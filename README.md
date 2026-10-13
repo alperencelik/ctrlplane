@@ -18,8 +18,6 @@ GitHub and create a control plane without running anything yourself.
 
 CLI: [ctrlplane-cli](https://github.com/alperencelik/ctrlplane-cli).
 
-## Getting started
-
 ```sh
 brew install alperencelik/tap/ctrlplane
 ctrlplane login                    # sign in with GitHub
@@ -28,6 +26,8 @@ ctrlplane use dev                  # point kubectl at it
 kubectl apply -f crds/             # your CRDs
 ctrlplane deploy my-operator --image ghcr.io/you/my-operator:v1
 ```
+
+More in the [getting started guide](https://docs.ctrlplane.run/start/getting-started/).
 
 ## Building and testing
 
