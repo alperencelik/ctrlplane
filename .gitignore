@@ -1,0 +1,9 @@
+bin/
+.local/
+*.db*
+kine.sock
+/pki/
+config/samples/kubemox/proxmoxconnection.yaml
+dist/
+/platform
+/tenant-apiserver

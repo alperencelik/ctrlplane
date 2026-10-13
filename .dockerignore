@@ -1,0 +1,6 @@
+bin/
+.local/
+*.db*
+kine.sock
+pki/
+dist/

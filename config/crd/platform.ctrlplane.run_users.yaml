@@ -1,0 +1,97 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: users.platform.ctrlplane.run
+spec:
+  group: platform.ctrlplane.run
+  names:
+    kind: User
+    listKind: UserList
+    plural: users
+    singular: user
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.login
+      name: Login
+      type: string
+    - jsonPath: .spec.status
+      name: Status
+      type: string
+    - jsonPath: .spec.limits.controlPlanes
+      name: Control planes
+      type: integer
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: User is a platform account, one per login, managed from /admin.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              limits:
+                description: Limits are what an account may use. Also stored in the
+                  platform-settings ConfigMap.
+                properties:
+                  controlPlanes:
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  controllers:
+                    description: |-
+                      Controllers per control plane; 0 = the platform default (5). Each tenant namespace gets a
+                      ResourceQuota on its controller pods from this, CPU and Memory.
+                    maximum: 20
+                    minimum: 0
+                    type: integer
+                  cpu:
+                    description: |-
+                      CPU limit per control plane, shared by its controllers as they set (an even share each by
+                      default); empty = not limited.
+                    type: string
+                  memory:
+                    description: Memory limit per control plane, shared like CPU.
+                    type: string
+                  tunnel:
+                    description: May connect a network (spec.tunnel)
+                    type: boolean
+                type: object
+              login:
+                description: As authenticated, <connector>:<name> (e.g. github:alice)
+                minLength: 1
+                type: string
+              status:
+                enum:
+                - active
+                - pending
+                - suspended
+                type: string
+            required:
+            - login
+            - status
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}

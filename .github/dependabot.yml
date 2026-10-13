@@ -1,0 +1,37 @@
+# Weekly update PRs; CI checks each one. Actions are pinned to commit SHAs: Dependabot moves the
+# SHA and its version comment together. Releases wait a week first (cooldown), so a hijacked one
+# is usually caught and pulled before it's proposed here.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    # k8s.io/* (pinned by the replace directives in go.mod) and controller-runtime move together:
+    # bump those by hand.
+    ignore:
+      - dependency-name: k8s.io/*
+      - dependency-name: sigs.k8s.io/controller-runtime
+      # kine 1.x needs a newer etcd (and so Kubernetes) than k8s.io/* is pinned to: with those.
+      - dependency-name: github.com/k3s-io/kine
+        versions: ['>=1.0.0']
+    groups:
+      go:
+        patterns: ['*']
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7

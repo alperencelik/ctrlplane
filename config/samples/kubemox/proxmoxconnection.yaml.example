@@ -1,0 +1,16 @@
+# Copy to proxmoxconnection.yaml (gitignored), fill in, apply INSIDE the kubemox tenant.
+# endpoint: host or IP only; kubemox adds https://<endpoint>:8006/api2/json.
+# Must be reachable from the host cluster's pods (on kind: from the Docker VM).
+apiVersion: proxmox.alperen.cloud/v1alpha1
+kind: ProxmoxConnection
+metadata:
+  name: proxmox
+spec:
+  endpoint: "proxmox.example.com"
+  # either username/password ...
+  username: "root@pam"
+  password: "CHANGE_ME"
+  # ... or an API token:
+  # tokenID: "root@pam!kubemox"
+  # secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  insecureSkipVerify: true

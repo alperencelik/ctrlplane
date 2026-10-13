@@ -1,0 +1,9 @@
+# Apply INSIDE a tenant after tenant-crd.yaml. No namespace: the tenant kubeconfig
+# defaults to namespace <tenant>, the only one its controllers are allowed to use.
+apiVersion: proxmox.example.com/v1alpha1
+kind: VirtualMachine
+metadata:
+  name: web-1
+spec:
+  cores: 4
+  memory: 8192

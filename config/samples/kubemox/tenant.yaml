@@ -1,0 +1,21 @@
+# kubemox (Proxmox operator) as a hosted controller.
+# Inside the tenant API it is ServiceAccount kubemox/kubemox; POD_NAMESPACE=kubemox.
+apiVersion: platform.ctrlplane.run/v1alpha1
+kind: Tenant
+metadata:
+  name: kubemox
+spec:
+  controllers:
+  - name: kubemox
+    image: alperencelik/kubemox:v0.6.6
+    args: [--leader-elect, --health-probe-bind-address=:8081, --metrics-bind-address=:8080]
+    # kubemox's secondary clientset only looks at ~/.kube/config (else in-cluster, which has no token here).
+    env:
+    - name: HOME
+      value: /var/run/tenant
+    resources:
+      requests:
+        cpu: 10m
+        memory: 64Mi
+      limits:
+        memory: 256Mi

@@ -1,0 +1,34 @@
+# Deleting a Tenant deletes its data (namespace, API server PVC, PKI). It's refused unless the
+# Tenant is annotated platform.ctrlplane.run/confirm-delete=<its name>, so a stray
+# `kubectl delete tenants --all` can't wipe the platform. The website sets the annotation when an
+# owner confirms. Installed by the chart; the envtest suite applies this same file.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: ctrlplane-tenant-delete-confirmation
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [platform.ctrlplane.run]
+        apiVersions: ["*"]
+        operations: [DELETE]
+        resources: [tenants]
+  validations:
+    - expression: >-
+        has(oldObject.metadata.annotations) &&
+        'platform.ctrlplane.run/confirm-delete' in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations['platform.ctrlplane.run/confirm-delete'] == oldObject.metadata.name
+      messageExpression: >-
+        'deleting Tenant ' + oldObject.metadata.name + ' deletes its data; to confirm, first run:
+        kubectl annotate tenant ' + oldObject.metadata.name +
+        ' platform.ctrlplane.run/confirm-delete=' + oldObject.metadata.name
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: ctrlplane-tenant-delete-confirmation
+spec:
+  policyName: ctrlplane-tenant-delete-confirmation
+  validationActions: [Deny]
