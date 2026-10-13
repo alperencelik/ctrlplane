@@ -13,8 +13,21 @@ It comes with what operators usually need, already wired up:
   nothing to maintain after that: no upgrades, certificates or backups to look after. Sign in with
   kubectl and apply your CRDs and controllers, and the platform runs them for you.
 
-Docs: [docs.ctrlplane.run](https://docs.ctrlplane.run). CLI:
-[ctrlplane-cli](https://github.com/alperencelik/ctrlplane-cli).
+Want to try it? [ctrlplane.run](https://ctrlplane.run) is the hosted platform: sign in with
+GitHub and create a control plane without running anything yourself.
+
+CLI: [ctrlplane-cli](https://github.com/alperencelik/ctrlplane-cli).
+
+## Getting started
+
+```sh
+brew install alperencelik/tap/ctrlplane
+ctrlplane login                    # sign in with GitHub
+ctrlplane create dev --wait        # your own control plane
+ctrlplane use dev                  # point kubectl at it
+kubectl apply -f crds/             # your CRDs
+ctrlplane deploy my-operator --image ghcr.io/you/my-operator:v1
+```
 
 ## Building and testing
 
