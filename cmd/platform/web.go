@@ -226,6 +226,8 @@ func (w *web) routes() *http.ServeMux {
 	mux.HandleFunc("POST /tenants/{name}/controllers", w.authed(w.addController))
 	mux.HandleFunc("DELETE /tenants/{name}/controllers/{controller}", w.authed(w.removeController))
 	mux.HandleFunc("POST /tenants/{name}/controllers/{controller}/restart", w.authed(w.restartController))
+	mux.HandleFunc("POST /tenants/{name}/controllers/{controller}/stop", w.authed(w.stopController(true)))
+	mux.HandleFunc("POST /tenants/{name}/controllers/{controller}/start", w.authed(w.stopController(false)))
 	mux.HandleFunc("GET /tenants/{name}/controllers/{controller}/logs", w.authed(fragment("controllers", w.controllerLogs)))
 	mux.HandleFunc("GET /tenants/{name}/metrics/{api}", w.authed(w.metrics))
 	mux.HandleFunc("GET /tenants/{name}/logs/{api}", w.authed(w.logs))
@@ -816,6 +818,7 @@ type controllerView struct {
 	MetricsPath            string
 	MetricsHTTPS           bool
 	Private                bool   // has registry credentials
+	Stopped                bool   // scaled to 0 (spec.controllers[].stopped)
 	Limits                 string // its CPU and memory limits as it runs, e.g. "250m CPU, 256Mi"
 	State                  string // "running", or what's wrong: ImagePullBackOff, CrashLoopBackOff, ...
 	Level                  string // ok | wait | bad, for the state's color
@@ -924,7 +927,7 @@ func (w *web) addController(rw http.ResponseWriter, r *http.Request, user string
 	list := slices.Clone(t.Spec.Controllers)
 	i := slices.IndexFunc(list, func(o platformv1alpha1.ControllerSpec) bool { return o.Name == c.Name })
 	if i >= 0 { // same name: update it (new image, args, env), keeping its registry credentials, and limits, probes and metrics unless new ones are given
-		c.ImagePullSecrets = list[i].ImagePullSecrets
+		c.ImagePullSecrets, c.Stopped = list[i].ImagePullSecrets, list[i].Stopped
 		if !fromYAML { // a deployment.yaml says them all
 			c.Resources = list[i].Resources
 			c.LivenessProbe, c.ReadinessProbe, c.StartupProbe = list[i].LivenessProbe, list[i].ReadinessProbe, list[i].StartupProbe
@@ -1093,6 +1096,28 @@ func (w *web) restartController(rw http.ResponseWriter, r *http.Request, user st
 	w.render(rw, "controllers", d)
 }
 
+// stopController scales a controller to 0 (stop) or back to 1 (start), via spec.controllers[].stopped.
+func (w *web) stopController(stop bool) func(http.ResponseWriter, *http.Request, string) {
+	return func(rw http.ResponseWriter, r *http.Request, user string) {
+		t, ok := w.ownedTenant(rw, r, user)
+		if !ok {
+			return
+		}
+		name := r.PathValue("controller")
+		msg := "no controller " + strconv.Quote(name)
+		if i := slices.IndexFunc(t.Spec.Controllers, func(o platformv1alpha1.ControllerSpec) bool { return o.Name == name }); i >= 0 {
+			t.Spec.Controllers[i].Stopped = stop
+			msg = w.update(r.Context(), t)
+		}
+		if wantsJSON(r) { // ctrlplane stop / start
+			reply(rw, msg, map[string]any{"name": name, "stopped": stop})
+			return
+		}
+		toast(rw, msg, map[bool]string{true: "Stopped ", false: "Starting "}[stop]+name)
+		w.render(rw, "controllers", w.tenantData(r.Context(), t, msg))
+	}
+}
+
 // restartDeployment rolls a deployment's pods as `kubectl rollout restart` does. A merge patch
 // under its own field manager, so the reconciler's server-side apply leaves the annotation be.
 func restartDeployment(ctx context.Context, c client.Client, ns, name string) error {
@@ -1136,7 +1161,7 @@ func (w *web) tenantData(ctx context.Context, t *platformv1alpha1.Tenant, msg st
 	d.TunnelAllowed = lim.Tunnel
 	run, _, _ := allocate(spec.Controllers, lim)
 	for _, c := range spec.Controllers {
-		v := controllerView{Name: c.Name, Image: c.Image, Args: strings.Join(c.Args, "\n"), State: "starting", Private: len(c.ImagePullSecrets) > 0}
+		v := controllerView{Name: c.Name, Image: c.Image, Args: strings.Join(c.Args, "\n"), State: "starting", Private: len(c.ImagePullSecrets) > 0, Stopped: c.Stopped}
 		for _, e := range c.Env {
 			v.Env += e.Name + "=" + e.Value + "\n"
 		}
@@ -1174,6 +1199,11 @@ func (w *web) tenantData(ctx context.Context, t *platformv1alpha1.Tenant, msg st
 			parts = append(parts, q.String())
 		}
 		v.Limits = strings.Join(parts, ", ")
+		if c.Stopped {
+			v.State, v.Detail = "stopped", "scaled to 0: start it to reconcile again"
+			d.Controllers = append(d.Controllers, v)
+			continue
+		}
 		v.State, v.Level, v.Detail = w.controllerState(ctx, "tenant-"+t.GetName(), c.Name)
 		d.Starting = d.Starting || v.State != "running"
 		d.Controllers = append(d.Controllers, v)

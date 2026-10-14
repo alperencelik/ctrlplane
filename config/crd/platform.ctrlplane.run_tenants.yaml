@@ -693,6 +693,11 @@ spec:
                       - message: 'tcpSocket.host isn''t allowed: probes target the
                           controller''s pod'
                         rule: '!has(self.tcpSocket) || !has(self.tcpSocket.host)'
+                    stopped:
+                      description: |-
+                        Scaled to 0 replicas: nothing runs (nor serves its webhooks) until it's started again; its
+                        settings, credentials and share of the limits stay
+                      type: boolean
                     webhook:
                       description: |-
                         Admission and conversion webhooks the controller serves: the tenant API server calls service

@@ -450,6 +450,37 @@ func TestRestartController(t *testing.T) {
 	})
 }
 
+// A stopped controller's Deployment is scaled to 0, and back to 1 when it's started again.
+func TestStopController(t *testing.T) {
+	ctx := context.Background()
+	tenant := &platformv1alpha1.Tenant{ObjectMeta: metav1.ObjectMeta{Name: "stop"}, Spec: platformv1alpha1.TenantSpec{
+		Controllers: []platformv1alpha1.ControllerSpec{{Name: "c", Image: "ghcr.io/me/op:v1", Stopped: true}}}}
+	if err := k8sClient.Create(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	replicas := func(want int32) {
+		eventually(t, func() error {
+			dep := &appsv1.Deployment{}
+			if err := apiReader.Get(ctx, client.ObjectKey{Namespace: "tenant-stop", Name: "ctrl-c"}, dep); err != nil {
+				return err
+			}
+			if *dep.Spec.Replicas != want {
+				return fmt.Errorf("replicas = %d, want %d", *dep.Spec.Replicas, want)
+			}
+			return nil
+		})
+	}
+	replicas(0)
+	if err := apiReader.Get(ctx, client.ObjectKeyFromObject(tenant), tenant); err != nil {
+		t.Fatal(err)
+	}
+	tenant.Spec.Controllers[0].Stopped = false
+	if err := k8sClient.Update(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	replicas(1)
+}
+
 // A controller's webhooks get a Service on 443 and a cert from the tenant CA for the name the
 // tenant API server checks, mounted where controller-runtime looks; both go with the webhook.
 func TestControllerWebhook(t *testing.T) {
