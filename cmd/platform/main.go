@@ -784,8 +784,12 @@ func (r *reconciler) controllerDeployment(ns, tenantNS string, c platformv1alpha
 		pod.WithVolumes(corev1ac.Volume().WithName("webhook-cert").WithSecret(corev1ac.SecretVolumeSource().WithSecretName(webhookName(c.Name))))
 	}
 
+	replicas := int32(1)
+	if c.Stopped {
+		replicas = 0
+	}
 	return appsv1ac.Deployment("ctrl-"+c.Name, ns).WithLabels(labels).WithOwnerReferences(owner).WithSpec(appsv1ac.DeploymentSpec().
-		WithReplicas(1).
+		WithReplicas(replicas).
 		WithSelector(metav1ac.LabelSelector().WithMatchLabels(labels)).
 		WithTemplate(corev1ac.PodTemplateSpec().WithLabels(labels).WithAnnotations(metricsAnnotations(c)).
 			WithAnnotations(annotations).WithSpec(r.withMetricsProxy(pod, c, tenantNS))))

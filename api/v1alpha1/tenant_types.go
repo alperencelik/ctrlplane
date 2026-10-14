@@ -96,6 +96,10 @@ type ControllerSpec struct {
 	// +kubebuilder:validation:items:MaxLength=40
 	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
 	ImagePullSecrets []string `json:"imagePullSecrets,omitempty"`
+	// Scaled to 0 replicas: nothing runs (nor serves its webhooks) until it's started again; its
+	// settings, credentials and share of the limits stay
+	// +optional
+	Stopped bool `json:"stopped,omitempty"`
 }
 
 // Probe checks the controller container. Probes run on the node, outside the pod's network

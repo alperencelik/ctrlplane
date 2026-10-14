@@ -496,6 +496,7 @@
   <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.7-4.4M4 4v4h4M4 13a8 8 0 0 0 14.7 4.4M20 20v-4h-4"/></symbol>
   <symbol id="i-out" viewBox="0 0 24 24"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l-4-4 4-4M6 12h10"/></symbol>
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5z"/></symbol>
 </svg>
 <header class="top">
   <a class="brand" href="/"><svg viewBox="0 0 48 48" aria-hidden="true"><g stroke-width="2.8" stroke-linejoin="round"><path d="M24 24 42 32.5 24 41 6 32.5Z" fill="#FFC4A3"/><path d="M24 16 42 24.5 24 33 6 24.5Z" fill="#A6E3C8"/><path d="M24 8 42 16.5 24 25 6 16.5Z" fill="#C8B8FA"/></g></svg>ctrlplane</a>
@@ -910,42 +911,68 @@ document.addEventListener("click", e => {
 })();
 
 // Resources: filter types and objects by name, order the types, sort a table by a column.
+// Folds and the order are kept per browser and control plane, column sorts for the page, so a
+// refresh (the button, an apply or delete, a reload) doesn't undo them.
 (() => {
   const q = document.getElementById("res-q"), order = document.getElementById("res-order");
   if (!q) return;
-  const apply = () => {
-    const box = document.getElementById("resources"), s = q.value.trim().toLowerCase();
-    const kinds = [...box.querySelectorAll(".kind")];
-    for (const k of kinds) {
-      const typeHit = !s || k.dataset.type.toLowerCase().includes(s);
-      let n = 0;
-      for (const tr of k.querySelectorAll("tr[data-name]")) n += !(tr.hidden = !typeHit && !tr.dataset.name.toLowerCase().includes(s));
-      k.hidden = !typeHit && !n;
-      if (s && n) k.open = true;
-    }
-    const byCount = order.querySelector("[aria-pressed=true]").dataset.order === "count";
-    kinds.sort((a, b) => (byCount && b.dataset.n - a.dataset.n) || a.dataset.type.localeCompare(b.dataset.type));
-    box.append(...kinds);
-  };
-  q.addEventListener("input", apply);
-  order.addEventListener("click", e => {
-    const b = e.target.closest("[data-order]");
-    if (!b) return;
-    order.querySelectorAll("button").forEach(o => o.setAttribute("aria-pressed", o === b));
-    apply();
-  });
-  document.addEventListener("htmx:afterSwap", e => { if (e.detail.target.id === "resources") apply(); });
-  document.addEventListener("click", e => {
-    const th = e.target.closest(".kt th:has(.sort)");
+  const key = "resources:" + location.pathname;
+  let st = {};
+  try { st = JSON.parse(localStorage.getItem(key)) || {}; } catch (e) {}
+  st.open ||= {};
+  const save = () => { try { localStorage.setItem(key, JSON.stringify(st)); } catch (e) {} };
+  const sorts = {}; // type → [column, 1 | -1]
+  const sort = (k, i, dir) => {
+    const th = k.querySelectorAll(".kt th")[i];
     if (!th) return;
-    const head = th.parentNode, i = [...head.children].indexOf(th), dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1;
+    const head = th.parentNode;
     head.querySelectorAll("th").forEach(t => t.removeAttribute("aria-sort"));
     th.setAttribute("aria-sort", dir > 0 ? "ascending" : "descending");
     // ponytail: text order (numeric-aware); AGE ("5m" vs "2d") sorts by text, not time.
     const rows = [...head.parentNode.querySelectorAll("tr[data-name]")];
     rows.sort((a, b) => dir * a.cells[i].textContent.trim().localeCompare(b.cells[i].textContent.trim(), undefined, { numeric: true }));
     head.parentNode.append(...rows);
+  };
+  const apply = () => {
+    const box = document.getElementById("resources"), s = q.value.trim().toLowerCase();
+    const kinds = [...box.querySelectorAll(".kind")];
+    for (const k of kinds) {
+      const type = k.dataset.type, typeHit = !s || type.toLowerCase().includes(s);
+      let n = 0;
+      for (const tr of k.querySelectorAll("tr[data-name]")) n += !(tr.hidden = !typeHit && !tr.dataset.name.toLowerCase().includes(s));
+      k.hidden = !typeHit && !n;
+      // As folded by hand, else as rendered (open with objects or an error); a match opens.
+      k.open = (s && n > 0) || (st.open[type] ?? (k.dataset.n > 0 || !!k.querySelector(":scope > .err")));
+      if (sorts[type]) sort(k, ...sorts[type]);
+    }
+    const byCount = order.querySelector("[aria-pressed=true]").dataset.order === "count";
+    kinds.sort((a, b) => (byCount && b.dataset.n - a.dataset.n) || a.dataset.type.localeCompare(b.dataset.type));
+    box.append(...kinds);
+  };
+  const pressOrder = o => order.querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", b.dataset.order === o));
+  q.addEventListener("input", apply);
+  order.addEventListener("click", e => {
+    const b = e.target.closest("[data-order]");
+    if (!b) return;
+    pressOrder(st.order = b.dataset.order);
+    save();
+    apply();
   });
+  document.addEventListener("htmx:afterSwap", e => { if (e.detail.target.id === "resources") apply(); });
+  document.addEventListener("click", e => {
+    const sum = e.target.closest("details.kind > summary");
+    if (sum && !e.target.closest("button")) { // a fold (the click comes before the toggle)
+      st.open[sum.parentNode.dataset.type] = !sum.parentNode.open;
+      save();
+    }
+    const th = e.target.closest(".kt th:has(.sort)");
+    if (!th) return;
+    const k = th.closest(".kind"), i = [...th.parentNode.children].indexOf(th);
+    sorts[k.dataset.type] = [i, th.getAttribute("aria-sort") === "ascending" ? -1 : 1];
+    sort(k, ...sorts[k.dataset.type]);
+  });
+  if (st.order) pressOrder(st.order);
+  apply();
 })();
 
 // Control plane page: one view at a time, picked by the URL hash, so links and back/forward work.
@@ -1467,8 +1494,11 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
       data-cpu="{{.CPU}}" data-memory="{{.Memory}}" data-probes="{{.Probes}}" data-webhook-port="{{.WebhookPort}}"
       data-metrics-port="{{.MetricsPort}}" data-metrics-path="{{.MetricsPath}}"{{if .MetricsHTTPS}} data-metrics-https{{end}}{{if .Private}} data-private{{end}}>{{template "ico" "edit"}}Edit</button>
       <a class="btn small" href="#observability" data-logs="{{.Name}}">{{template "ico" "logs"}}Logs</a>
+      {{if .Stopped}}<button class="small" hx-post="/tenants/{{$.Name}}/controllers/{{.Name}}/start" hx-target="#controllers" hx-swap="outerHTML">{{template "ico" "play"}}Start</button>
+      {{else}}<button class="small" hx-post="/tenants/{{$.Name}}/controllers/{{.Name}}/stop" hx-target="#controllers" hx-swap="outerHTML"
+      hx-confirm="Stop controller {{.Name}}? It's scaled to 0: nothing reconciles (and its webhooks don't answer) until you start it again. Its settings and your resources stay." data-confirm-action="Stop">{{template "ico" "pause"}}Stop</button>
       <button class="small" hx-post="/tenants/{{$.Name}}/controllers/{{.Name}}/restart" hx-target="#controllers" hx-swap="outerHTML"
-      hx-confirm="Restart controller {{.Name}}? Its pod is replaced with a fresh one; your resources stay." data-confirm-action="Restart">{{template "ico" "refresh"}}Restart</button>
+      hx-confirm="Restart controller {{.Name}}? Its pod is replaced with a fresh one; your resources stay." data-confirm-action="Restart">{{template "ico" "refresh"}}Restart</button>{{end}}
       <button class="quiet small danger" hx-delete="/tenants/{{$.Name}}/controllers/{{.Name}}" hx-target="#controllers" hx-swap="outerHTML"
       hx-confirm="Remove controller {{.Name}}? It stops and its deployment is deleted; your resources stay." data-confirm-action="Remove controller">{{template "ico" "trash"}}Remove</button></span></td>
   </tr>
