@@ -94,7 +94,7 @@ func runControllers(ctx context.Context, cfg *rest.Config) error {
 
 // bootstrapTenantNamespace creates the tenant's namespace and lets the platform-run controllers
 // (group pki.ControllerGroup, in their client certs) do anything inside that namespace, and
-// nothing outside it. Other ServiceAccounts there (tokens owners make, e.g. for Grafana or CI)
+// only read outside it. Other ServiceAccounts there (tokens owners make, e.g. for Grafana or CI)
 // get only this tenant's metrics and logs, plus what owners grant them. Owners get the same as controllers, plus CRDs
 // (cluster-scoped) and their controllers' status/logs; no kube-system, and no
 // listing or creating namespaces. Retries until the API is ready.
@@ -121,6 +121,20 @@ func bootstrapTenantNamespace(ctx context.Context, cfg *rest.Config, ns string, 
 		}
 		if _, err := client.RbacV1().RoleBindings(ns).Apply(ctx, rbacv1ac.RoleBinding("tenant-controllers", ns).
 			WithRoleRef(rbacv1ac.RoleRef().WithAPIGroup("rbac.authorization.k8s.io").WithKind("Role").WithName("tenant-controllers")).
+			WithSubjects(rbacv1ac.Subject().WithKind("Group").WithAPIGroup("rbac.authorization.k8s.io").WithName(pki.ControllerGroup)), apply); err != nil {
+			klog.V(2).InfoS("tenant namespace bootstrap retry", "err", err)
+			return false, nil
+		}
+		// Read-only, cluster-wide: operators' caches often list/watch at the cluster scope (e.g. all
+		// Secrets). Owners can't create namespaces, so beyond ns that's only kube-system and default.
+		// Writes stay in ns (tenant-controllers above).
+		if _, err := client.RbacV1().ClusterRoles().Apply(ctx, rbacv1ac.ClusterRole("tenant-controllers-read").WithRules(
+			rbacv1ac.PolicyRule().WithAPIGroups("*").WithResources("*").WithVerbs("get", "list", "watch")), apply); err != nil {
+			klog.V(2).InfoS("tenant namespace bootstrap retry", "err", err)
+			return false, nil
+		}
+		if _, err := client.RbacV1().ClusterRoleBindings().Apply(ctx, rbacv1ac.ClusterRoleBinding("tenant-controllers-read").
+			WithRoleRef(rbacv1ac.RoleRef().WithAPIGroup("rbac.authorization.k8s.io").WithKind("ClusterRole").WithName("tenant-controllers-read")).
 			WithSubjects(rbacv1ac.Subject().WithKind("Group").WithAPIGroup("rbac.authorization.k8s.io").WithName(pki.ControllerGroup)), apply); err != nil {
 			klog.V(2).InfoS("tenant namespace bootstrap retry", "err", err)
 			return false, nil
