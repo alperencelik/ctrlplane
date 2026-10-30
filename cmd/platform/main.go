@@ -960,6 +960,9 @@ func main() {
 			err = mgr.Add(&eventShipper{Reader: mgr.GetClient(), platformNS: platformNS, vl: logsURL,
 				http: &http.Client{Timeout: 30 * time.Second}, config: inClusterConfig})
 		}
+		if err == nil {
+			err = mgr.Add(&deployShipper{cs: cs, vl: logsURL, http: &http.Client{Timeout: 30 * time.Second}})
+		}
 	}
 	if err == nil {
 		rec := &reconciler{

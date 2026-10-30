@@ -331,7 +331,13 @@
   .tabs [role="tab"] { border: 0; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 12px 12px; margin-bottom: -1px; border-bottom: 2px solid transparent; }
   .tabs [role="tab"]:hover { color: var(--ink); }
   .tabs [role="tab"][aria-selected="true"] { color: var(--ink); border-bottom-color: var(--wire); }
-  .plot .ref { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 4 4; }
+  .plot .ref { fill: none; stroke: var(--faint); stroke-width: 1; stroke-dasharray: 4 4; }
+  .plot .mark { stroke: var(--wait); stroke-width: 1.5; }
+  .plot .mark.soft { stroke: var(--faint); stroke-width: 1; stroke-dasharray: 2 3; }
+  .plot .mark-cap { fill: var(--wait); }
+  .plot .mark-cap.soft { fill: var(--faint); }
+  .plot .mark-tip { position: absolute; top: 0; z-index: 2; max-width: min(320px, 85%); padding: 6px 10px; background: var(--raised); border: 1px solid var(--rule); border-radius: 8px; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; pointer-events: none; }
+  .plot .mark-tip div + div { margin-top: 4px; }
   .m-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; transition: opacity .15s; }
   .m-grid.loading, #log-results.loading { opacity: .55; }
   @media (max-width: 760px) { .m-grid { grid-template-columns: minmax(0, 1fr); } }
@@ -645,12 +651,13 @@ document.addEventListener("click", e => {
     errors: c => `sum(rate(controller_runtime_reconcile_errors_total{${sel(c)}}[2m]))`,
     p95: c => `histogram_quantile(0.95, sum by (le) (rate(controller_runtime_reconcile_time_seconds_bucket{${sel(c)}}[5m])))`,
     depth: c => `sum(workqueue_depth{${sel(c)}})`,
-    cpu: c => `sum(rate(container_cpu_usage_seconds_total{${sel(c)}}[2m]))`,
-    mem: c => `sum(container_memory_working_set_bytes{${sel(c)}})`,
-    rx: c => `sum(rate(container_network_receive_bytes_total{${sel(c)}}[2m]))`,
-    tx: c => `sum(rate(container_network_transmit_bytes_total{${sel(c)}}[2m]))`,
+    // max, not sum: one replica runs, and adding up the old and new pods of a rollout would draw a spike at every change.
+    cpu: c => `max(rate(container_cpu_usage_seconds_total{${sel(c)}}[2m]))`,
+    mem: c => `max(container_memory_working_set_bytes{${sel(c)}})`,
+    rx: c => `max(rate(container_network_receive_bytes_total{${sel(c)}}[2m]))`,
+    tx: c => `max(rate(container_network_transmit_bytes_total{${sel(c)}}[2m]))`,
   };
-  // A reference line drawn on the chart (the memory limit).
+  // A reference line drawn on the chart (the memory limit), over time: it can change in the range.
   const refs = { mem: c => `max(container_spec_memory_limit_bytes{${sel(c)}}) > 0` };
   const perSec = v => (v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "/s";
   const secs = v => v < 1 ? Math.round(v * 1000) + " ms" : v.toFixed(2) + " s";
@@ -671,16 +678,61 @@ document.addEventListener("click", e => {
     return j.data.result;
   }
 
+  // What changed about the controller in the range, oldest first (deployship.go). Only marks on
+  // the charts: without them, as without a logs store, the charts still show.
+  async function deployMarks(c, start, end) {
+    try {
+      const body = await logsGet("query", { query: `{ctrlplane_source="deploys"} controller:=${JSON.stringify(c)} -kind:=baseline | sort by (_time) desc`, start, end, limit: 500 });
+      return body.split("\n").filter(Boolean).map(l => JSON.parse(l)).map(r => ({ t: Date.parse(r._time), kind: r.kind, msg: r._msg })).reverse();
+    } catch { return []; }
+  }
+
+  // A line at each change, those too close to tell apart merged. Changes to the controller stand
+  // out over restarts and the platform's rollouts. Returns what shows the tip of the line at a time.
+  const softMarks = { restarted: true, platform: true, stopped: true, started: true };
+  function drawMarks(f, svg, plot, x, top, bottom, W) {
+    const groups = [];
+    for (const m of f.data.marks) {
+      const px = x(m.t), g = groups[groups.length - 1];
+      if (g && px - g.px < 6) { g.items.push(m); g.soft &&= !!softMarks[m.kind]; } else groups.push({ px, items: [m], soft: !!softMarks[m.kind] });
+    }
+    for (const g of groups) {
+      const soft = g.soft ? " soft" : "";
+      svg.append(svgEl("line", { class: "mark" + soft, x1: g.px, x2: g.px, y1: top, y2: bottom }));
+      svg.append(svgEl("path", { class: "mark-cap" + soft, d: `M${g.px - 4},${top - 6}h8l-4,6z` }));
+    }
+    const tip = document.createElement("div");
+    tip.className = "mark-tip"; tip.hidden = true;
+    plot.append(tip);
+    return (t, own) => {
+      const g = t == null || !own ? null : groups.find(g => Math.abs(g.px - x(t)) < 6);
+      tip.hidden = !g;
+      if (!g) return;
+      const newest = g.items.slice(-5).reverse().map(m => { const e = document.createElement("div"); e.textContent = when(m.t) + " · " + m.msg; return e; });
+      if (g.items.length > 5) { const e = document.createElement("div"); e.textContent = "and " + (g.items.length - 5) + " more"; newest.push(e); }
+      tip.replaceChildren(...newest);
+      const left = g.px < W / 2;
+      tip.style.left = left ? g.px + 8 + "px" : "";
+      tip.style.right = left ? "" : W - g.px + 8 + "px";
+    };
+  }
+
   function draw(f) {
     const { pts, t0, t1, ref } = f.data, plot = f.querySelector(".plot"), out = f.querySelector("output");
     plot.replaceChildren();
     const W = plot.clientWidth, H = plot.clientHeight, top = 14, bottom = H - 20;
     const fmtv = fmt[f.dataset.kind];
     out.textContent = pts.length ? "now " + fmtv(pts[pts.length - 1][1]) : "";
-    if (!pts.length) { const e = document.createElement("div"); e.className = "empty"; e.textContent = f.dataset.kind === "p95" ? "No reconciles in this range" : "No data in this range"; plot.append(e); return; }
-    const ymax = (isBytes[f.dataset.kind] ? niceBytes : niceMax)(Math.max(ref || 0, ...pts.map(p => p[1])));
-    const x = t => (t - t0) / (t1 - t0) * W, y = v => bottom - v / ymax * (bottom - top);
+    const x = t => (t - t0) / (t1 - t0) * W;
     const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": f.querySelector("figcaption span").textContent });
+    if (!pts.length) { // a controller that broke on a change may leave no data: still show the change
+      const e = document.createElement("div"); e.className = "empty"; e.textContent = f.dataset.kind === "p95" ? "No reconciles in this range" : "No data in this range"; plot.append(e);
+      plot.append(svg);
+      f.hover = drawMarks(f, svg, plot, x, top, bottom, W);
+      return;
+    }
+    const ymax = (isBytes[f.dataset.kind] ? niceBytes : niceMax)(Math.max(...ref.map(p => p[1]), ...pts.map(p => p[1])));
+    const y = v => bottom - v / ymax * (bottom - top);
     for (const v of [0, ymax / 2, ymax]) {
       svg.append(svgEl("line", { class: "grid", x1: 0, x2: W, y1: y(v), y2: y(v) }));
       const l = svgEl("text", { class: "tick", x: 0, y: y(v) - 4 }); l.textContent = fmtv(v); svg.append(l);
@@ -688,14 +740,18 @@ document.addEventListener("click", e => {
     for (const [t, anchor] of [[t0, "start"], [t1, "end"]]) {
       const l = svgEl("text", { class: "tick", x: x(t), y: H - 4, "text-anchor": anchor }); l.textContent = when(t); svg.append(l);
     }
-    if (ref) {
-      svg.append(svgEl("line", { class: "ref", x1: 0, x2: W, y1: y(ref), y2: y(ref) }));
-      const l = svgEl("text", { class: "tick", x: W, y: y(ref) - 4, "text-anchor": "end" }); l.textContent = "limit " + fmtv(ref); svg.append(l);
+    const line = ps => ps.map((p, i) => (i ? "L" : "M") + x(p[0]).toFixed(1) + "," + y(p[1]).toFixed(1)).join("");
+    if (ref.length) {
+      const now = ref[ref.length - 1][1];
+      svg.append(svgEl("path", { class: "ref", d: line(ref) }));
+      const l = svgEl("text", { class: "tick", x: W, y: y(now) - 4, "text-anchor": "end" }); l.textContent = "limit " + fmtv(now); svg.append(l);
     }
-    svg.append(svgEl("path", { class: "line", d: pts.map((p, i) => (i ? "L" : "M") + x(p[0]).toFixed(1) + "," + y(p[1]).toFixed(1)).join("") }));
+    svg.append(svgEl("path", { class: "line", d: line(pts) }));
+    const showMark = drawMarks(f, svg, plot, x, top, bottom, W);
     const xhair = svgEl("line", { class: "xhair", y1: top, y2: bottom, visibility: "hidden" }), dot = svgEl("circle", { class: "dot", r: 4, visibility: "hidden" });
     svg.append(xhair, dot);
-    f.hover = t => {
+    f.hover = (t, own) => {
+      showMark(t, own);
       if (t == null) { xhair.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); out.textContent = "now " + fmtv(pts[pts.length - 1][1]); return; }
       const p = pts.reduce((a, b) => Math.abs(b[0] - t) < Math.abs(a[0] - t) ? b : a);
       for (const [k, v] of [["x1", x(p[0])], ["x2", x(p[0])]]) xhair.setAttribute(k, v);
@@ -706,20 +762,21 @@ document.addEventListener("click", e => {
     plot.append(svg);
   }
 
-  // One crosshair for all four: pointer or arrow keys pick a time, every chart shows its value there.
+  // One crosshair for all four: pointer or arrow keys pick a time, every chart shows its value there;
+  // the chart in use also says what changed then.
   let cursor = null;
-  const hoverAll = t => { cursor = t; figs.forEach(f => f.hover && f.hover(t)); };
+  const hoverAll = (t, from) => { cursor = t; figs.forEach(f => f.hover && f.hover(t, f === from)); };
   figs.forEach(f => {
     const plot = f.querySelector(".plot");
     plot.tabIndex = 0;
-    plot.addEventListener("pointermove", e => { if (!f.data) return; const r = plot.getBoundingClientRect(); hoverAll(f.data.t0 + (e.clientX - r.left) / r.width * (f.data.t1 - f.data.t0)); });
+    plot.addEventListener("pointermove", e => { if (!f.data) return; const r = plot.getBoundingClientRect(); hoverAll(f.data.t0 + (e.clientX - r.left) / r.width * (f.data.t1 - f.data.t0), f); });
     plot.addEventListener("pointerleave", () => hoverAll(null));
     plot.addEventListener("blur", () => hoverAll(null));
     plot.addEventListener("keydown", e => {
       if (!f.data || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
       e.preventDefault();
       const span = f.data.t1 - f.data.t0, t = cursor ?? f.data.t1;
-      hoverAll(Math.min(f.data.t1, Math.max(f.data.t0, t + (e.key === "ArrowLeft" ? -1 : 1) * span / 60)));
+      hoverAll(Math.min(f.data.t1, Math.max(f.data.t0, t + (e.key === "ArrowLeft" ? -1 : 1) * span / 60)), f);
     });
   });
 
@@ -841,10 +898,12 @@ document.addEventListener("click", e => {
         note.hidden = !(note.textContent = !up.length ? `No metrics from ${c} yet. The first scrape happens within 15 seconds of it starting.`
           : up.every(s => s.value[1] === "0") ? `Can't read metrics from ${c}: nothing answers on its metrics port. If it serves them somewhere else, set metrics.port and metrics.path in its spec.` : "");
       }
+      const series = res => res.length ? res[0].values.map(([t, v]) => [t * 1000, +v]).filter(p => isFinite(p[1])) : [];
+      const marks = deployMarks(c, start, end);
       await Promise.all(shown().map(async f => {
         const k = f.dataset.kind;
-        const [res, ref] = await Promise.all([get("query_range", { query: queries[k](c), start, end, step }), refs[k] ? get("query", { query: refs[k](c) }) : []]);
-        f.data = { pts: res.length ? res[0].values.map(([t, v]) => [t * 1000, +v]).filter(p => isFinite(p[1])) : [], t0: start * 1000, t1: end * 1000, ref: ref.length ? +ref[0].value[1] : 0 };
+        const [res, ref, m] = await Promise.all([get("query_range", { query: queries[k](c), start, end, step }), refs[k] ? get("query_range", { query: refs[k](c), start, end, step }) : [], marks]);
+        f.data = { pts: series(res), t0: start * 1000, t1: end * 1000, ref: series(ref), marks: m };
         draw(f);
       }));
       if (tab === "reconcile") await loadTable(c); else table.hidden = true;
@@ -1334,7 +1393,7 @@ document.addEventListener("click", e => {
       <thead><tr><th>Reconciler</th><th class="num">Reconciles/s</th><th class="num">Errors/s</th><th class="num">p95 time</th></tr></thead>
       <tbody></tbody>
     </table>
-    <p class="muted foot">Reconciler metrics come from each controller's own endpoint (<code>:8080/metrics</code> unless its spec says otherwise); CPU, memory and network from its pod. Collected every 15 seconds, kept for 15 days.</p>
+    <p class="muted foot">Reconciler metrics come from each controller's own endpoint (<code>:8080/metrics</code> unless its spec says otherwise); CPU, memory and network from its pod. Collected every 15 seconds, kept for 15 days. Lines on the charts mark changes to the controller: point at one to see what changed; dotted ones are restarts, stops and starts, and the platform's own rollouts.</p>
   {{else}}<p class="none">Deploy a controller to see its metrics here.</p>{{end}}
   </div>
 

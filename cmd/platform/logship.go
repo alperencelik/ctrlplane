@@ -35,9 +35,11 @@ var (
 		Help: "Failed writes of controller log batches to VictoriaLogs (retried)."})
 	eventshipErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "ctrlplane_eventship_errors_total",
 		Help: "Failed writes of tenant event batches to VictoriaLogs (retried)."})
+	deployshipErrors = prometheus.NewCounter(prometheus.CounterOpts{Name: "ctrlplane_deployship_errors_total",
+		Help: "Failed reads and writes of controller deploy lines in VictoriaLogs (retried)."})
 )
 
-func init() { metrics.Registry.MustRegister(logshipErrors, eventshipErrors) }
+func init() { metrics.Registry.MustRegister(logshipErrors, eventshipErrors, deployshipErrors) }
 
 // logShipper follows the "controller" container of every tenant controller pod through the
 // Kubernetes API (like kubectl logs -f).
