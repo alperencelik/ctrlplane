@@ -56,7 +56,7 @@ func controllerPods(r *http.Request, host kubernetes.Interface, hostNS, selector
 	if err != nil {
 		return nil, err
 	}
-	// Newest first, so logs come from the current pod during a rollout.
+	// Newest first, so logs come from the current pod during a rollout (see logPod).
 	sort.Slice(pods.Items, func(i, j int) bool {
 		return pods.Items[j].CreationTimestamp.Before(&pods.Items[i].CreationTimestamp)
 	})
@@ -87,6 +87,20 @@ func listControllers(w http.ResponseWriter, r *http.Request, host kubernetes.Int
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// logPod picks the newest pod whose controller container has ever run: one stuck before that
+// (a bad image, say) has no logs, while the older pod still serving during a rollout does.
+// nil if none has run yet.
+func logPod(pods []corev1.Pod) *corev1.Pod {
+	for i := range pods {
+		for _, cs := range pods[i].Status.ContainerStatuses {
+			if cs.Name == "controller" && (cs.State.Running != nil || cs.State.Terminated != nil || cs.RestartCount > 0) {
+				return &pods[i]
+			}
+		}
+	}
+	return nil
+}
+
 func streamLogs(w http.ResponseWriter, r *http.Request, host kubernetes.Interface, hostNS, controller string) {
 	pods, err := controllerPods(r, host, hostNS, controllerLabel+"="+controller)
 	if err != nil {
@@ -96,6 +110,11 @@ func streamLogs(w http.ResponseWriter, r *http.Request, host kubernetes.Interfac
 	if len(pods) == 0 {
 		http.Error(w, "no pods for controller "+strconv.Quote(controller), http.StatusNotFound)
 		return
+	}
+	pod := logPod(pods)
+	if pod == nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		return // nothing has run, so there's no output yet
 	}
 	q := r.URL.Query()
 	opts := &corev1.PodLogOptions{
@@ -110,7 +129,7 @@ func streamLogs(w http.ResponseWriter, r *http.Request, host kubernetes.Interfac
 	if n, err := strconv.ParseInt(q.Get("sinceSeconds"), 10, 64); err == nil {
 		opts.SinceSeconds = &n
 	}
-	logs, err := host.CoreV1().Pods(hostNS).GetLogs(pods[0].Name, opts).Stream(r.Context())
+	logs, err := host.CoreV1().Pods(hostNS).GetLogs(pod.Name, opts).Stream(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

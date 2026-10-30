@@ -364,7 +364,11 @@
   .ctrls td:first-child strong { display: block; overflow-wrap: anywhere; }
   .ctrls td:first-child .cfg { color: var(--faint); }
   .ctrls td:first-child .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; overflow-wrap: normal; }
-  .ctrls .lims { white-space: nowrap; }
+  .ctrls .lims, .ctrls .state { white-space: nowrap; overflow-wrap: normal; }
+  /* A state's detail is a row of its own, so an error reads in full instead of in the State column. */
+  .ctrls tr:has(+ .ctrl-detail) td { border-bottom: 0; padding-bottom: 4px; }
+  .ctrls .ctrl-detail td:first-child { width: auto; max-width: none; padding-top: 0; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+  .ctrls .ctrl-detail.bad td:first-child { color: var(--bad); }
   label.check { display: flex; align-items: center; gap: 8px; font-weight: 400; }
   label.check input { width: auto; accent-color: var(--wire); }
   /* Narrow screens: rows become cards, each value under its column's name (data-label). */
@@ -382,8 +386,9 @@
     .cp .name code { max-width: 100%; }
     table.stack.ctrls td:first-child { width: auto; max-width: none; }
     .ctrls td:first-child .sub { white-space: normal; overflow-wrap: anywhere; }
+    table.stack.ctrls tr:has(+ .ctrl-detail) { border-bottom: 0; padding-bottom: 0; }
+    table.stack.ctrls .ctrl-detail { padding-top: 0; }
   }
-  td .detail { max-width: 26em; white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
   .events td:first-child { white-space: nowrap; }
   .events td:last-child { width: 11em; max-width: 11em; font-size: 12px; overflow-wrap: anywhere; }
   .events tr.warn td:first-child { box-shadow: inset 2px 0 0 var(--wait); padding-left: 10px; }
@@ -921,6 +926,8 @@ document.addEventListener("click", e => {
     otab = name;
     otabs.forEach(b => { const on = b.dataset.otab === name; b.setAttribute("aria-selected", String(on)); b.tabIndex = on ? 0 : -1; });
     for (const k in panels) panels[k].hidden = k !== name;
+    const events = document.getElementById("events-list");
+    if (name === "events" && events) htmx.trigger(events, "refresh");
     const pickWrap = document.getElementById("m-pick");
     if (pickWrap) pickWrap.hidden = name === "events";
     rangeRow.hidden = name === "events" || (name === "logs" && live);
@@ -1104,25 +1111,54 @@ document.addEventListener("click", e => {
       setTimeout(() => location.assign("/login?next=" + encodeURIComponent(location.pathname + location.search + location.hash)), 1200);
       return;
     }
+    if (isPoll(e)) return; // it tries again by itself
     // ctrlplane's own errors are short plain text; a proxy's error page isn't worth showing.
     const plain = (xhr.getResponseHeader("Content-Type") || "").startsWith("text/plain");
     toast((plain && xhr.responseText.trim().slice(0, 300)) || `Something went wrong (HTTP ${xhr.status}). Try again.`, false);
   });
-  document.addEventListener("htmx:sendError", () => toast("Can't reach ctrlplane. Check your connection and try again.", false));
-  // A list that refreshes itself (hx-trigger "every 3s") would replace the button of an action
-  // that's running or waiting for confirmation, and that action's result would go nowhere:
-  // skip the refresh until it's done.
-  document.addEventListener("htmx:beforeRequest", e => {
-    const elt = e.detail.elt;
-    if (/^every /.test(elt.getAttribute("hx-trigger") || "") &&
-        (elt.querySelector(".htmx-request") || document.getElementById("confirm")?.dataset.pending)) e.preventDefault();
+  document.addEventListener("htmx:sendError", e => isPoll(e) || toast("Can't reach ctrlplane. Check your connection and try again.", false));
+  // Lists refresh themselves (hx-trigger "every ...") so the page stays current without a reload.
+  // A refresh replaces the list, so it waits while that would get in the way: an action running
+  // or being confirmed (its result would go nowhere), an open dialog, a form being filled in,
+  // keyboard focus or selected text. It also waits while it can't be seen, except the overview,
+  // which keeps the side navigation current from any view.
+  function isPoll(e) {
+    const type = e.detail.requestConfig?.triggeringEvent?.type;
+    return /\bevery /.test(e.detail.elt.getAttribute("hx-trigger") || "") && (!type || type === "refresh");
+  }
+  const inTheWay = elt => {
+    const sel = getSelection();
+    return document.hidden || (elt.id !== "overview" && elt.closest("[hidden]")) ||
+      document.querySelector("dialog[open]") || document.getElementById("confirm")?.dataset.pending ||
+      elt.querySelector(".htmx-request, :focus-visible") ||
+      [...elt.querySelectorAll("form")].some(f => !f.closest("[hidden]")) ||
+      (sel && !sel.isCollapsed && elt.contains(sel.anchorNode));
+  };
+  document.addEventListener("htmx:beforeRequest", e => { if (isPoll(e) && inTheWay(e.detail.elt)) e.preventDefault(); });
+  // Nothing changed: leave the page alone, so animations, hovers and scroll positions carry on.
+  const lastHTML = {};
+  document.addEventListener("htmx:beforeSwap", e => {
+    const id = e.detail.target.id;
+    if (!id || !e.detail.shouldSwap) return;
+    if (isPoll(e) && lastHTML[id] === e.detail.serverResponse) e.detail.shouldSwap = false;
+    lastHTML[id] = e.detail.serverResponse;
   });
-  // The side navigation's counts follow the lists they count (each list says its own count).
-  document.addEventListener("htmx:afterSwap", () => {
-    for (const [list, n] of [["controllers", "nav-n-ctrl"], ["crds", "nav-n-api"], ["resources", "nav-n-res"]]) {
-      const l = document.getElementById(list), el = document.getElementById(n);
-      if (l && el && l.dataset.count !== undefined) el.textContent = l.dataset.count;
-    }
+  // A list out of sight waits, so bring it up to date as soon as it's shown.
+  const refresh = () => document.querySelectorAll('[hx-trigger*="refresh"]').forEach(el => htmx.trigger(el, "refresh"));
+  addEventListener("view", refresh);
+  document.addEventListener("visibilitychange", () => document.hidden || refresh());
+  // The side navigation follows the lists it counts (each list says its own count), and the
+  // overview, which has all of them.
+  const navCounts = { controllers: "nav-n-ctrl", crds: "nav-n-api", resources: "nav-n-res" };
+  document.addEventListener("htmx:afterSwap", e => {
+    const id = e.detail.target.id, data = document.getElementById(id)?.dataset;
+    if (id in navCounts && data?.count !== undefined) document.getElementById(navCounts[id]).textContent = data.count;
+    if (id !== "overview" || !data) return;
+    for (const k in navCounts) document.getElementById(navCounts[k]).textContent = data[k];
+    const warn = document.getElementById("nav-n-warn");
+    warn.textContent = data.warnings;
+    warn.hidden = data.warnings === "0";
+    document.querySelector('.side a[data-view="network"] .n').textContent = data.tunnel;
   });
   // An object (a CRD or a resource) opens in its dialog; Edit swaps its YAML for an editor.
   document.addEventListener("htmx:afterSwap", () => {
@@ -1152,7 +1188,7 @@ document.addEventListener("click", e => {
 {{define "create-button"}}{{if .AtLimit}}<span class="at-limit"><span class="muted small-text">Your account allows {{.Limits.ControlPlanes}} control plane{{if ne .Limits.ControlPlanes 1}}s{{end}}</span><button class="primary" disabled>Create control plane</button></span>
 {{else}}<button class="primary" data-open="create-dialog">Create control plane</button>{{end}}{{end}}
 
-{{define "home"}}<div id="home" {{if .Pending}}hx-get="/tenants" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+{{define "home"}}<div id="home" hx-get="/tenants" hx-trigger="every {{if .Pending}}3s{{else}}10s{{end}}, refresh" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 <section class="usage" aria-label="Your account">
   <div class="card hue-api"><span class="label">Control planes</span>
@@ -1230,13 +1266,15 @@ document.addEventListener("click", e => {
   <a href="#api" data-view="api" class="hue-api">{{template "ico" "api"}}API <span class="n" id="nav-n-api">{{len .CRDs}}</span></a>
   <a href="#resources" data-view="resources" class="hue-res">{{template "ico" "res"}}Resources <span class="n" id="nav-n-res">{{.ResourceCount}}</span></a>
   <a href="#controllers" data-view="controllers" class="hue-ctrl">{{template "ico" "ctrl"}}Controllers <span class="n" id="nav-n-ctrl">{{len .Controllers}}</span></a>
-  <a href="#observability" data-view="observability" class="hue-obs">{{template "ico" "obs"}}Observability{{if .Warnings}} <span class="n warn" title="Warnings in the last hour">{{len .Warnings}}</span>{{end}}</a>
+  <a href="#observability" data-view="observability" class="hue-obs">{{template "ico" "obs"}}Observability <span class="n warn" id="nav-n-warn" title="Warnings in the last hour"{{if not .Warnings}} hidden{{end}}>{{len .Warnings}}</span></a>
   <a href="#network" data-view="network" class="hue-net">{{template "ico" "net"}}Network <span class="n">{{if .Tunnel.Type}}on{{else}}off{{end}}</span></a>
 </nav>
 <div class="views">
 
 <section class="view" id="view-overview">
   <h2 class="view-title">{{template "ico" "overview"}}Overview</h2>
+  {{block "overview" .}}<div id="overview" {{if .Endpoint}}hx-get="/tenants/{{.Name}}/overview" hx-trigger="every 10s, refresh" hx-swap="outerHTML"{{end}}
+    data-crds="{{len .CRDs}}" data-resources="{{.ResourceCount}}" data-controllers="{{len .Controllers}}" data-warnings="{{len .Warnings}}" data-tunnel="{{if .Tunnel.Type}}on{{else}}off{{end}}">
   <ol class="path" aria-label="How requests reach your network">
     <li><div class="node"><span class="role">You</span><span class="what">kubectl</span><span class="via">or this page</span></div></li>
     <li><div class="node live hue-api"><span class="role">API server</span><span class="what">{{len .CRDs}} API {{if eq (len .CRDs) 1}}type{{else}}types{{end}}</span>
@@ -1288,6 +1326,7 @@ document.addEventListener("click", e => {
     </ol>
   </div>
   {{end}}
+  </div>{{end}}
 </section>
 
 <section class="view" id="view-api" hidden>
@@ -1443,7 +1482,7 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
 </div>
 </div>{{end}}
 
-{{define "crds"}}<div id="crds" data-count="{{len .CRDs}}" hx-get="/tenants/{{.Name}}/crds" hx-trigger="objects-changed from:body" hx-swap="outerHTML">
+{{define "crds"}}<div id="crds"{{if not .Error}} data-count="{{len .CRDs}}"{{end}} hx-get="/tenants/{{.Name}}/crds" hx-trigger="every 10s, refresh, objects-changed from:body" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 {{if .CRDs}}
 <table>
@@ -1460,7 +1499,7 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
 {{else}}<p class="none">No API types yet. Add your operator's CRDs to get started.</p>{{end}}
 </div>{{end}}
 
-{{define "resources"}}<div id="resources" data-count="{{.ResourceCount}}" hx-get="/tenants/{{.Name}}/resources" hx-trigger="objects-changed from:body" hx-swap="outerHTML">
+{{define "resources"}}<div id="resources"{{if not .Error}} data-count="{{.ResourceCount}}"{{end}} hx-get="/tenants/{{.Name}}/resources" hx-trigger="every 10s, refresh, objects-changed from:body" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 {{range .Kinds}}{{$k := .}}
 <details class="kind" data-type="{{.Kind}} {{.Resource}}.{{.Group}}" data-n="{{len .Rows}}"{{if or .Rows .Error}} open{{end}}>
@@ -1538,7 +1577,7 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
       </details>
 {{end}}
 
-{{define "controllers"}}<div id="controllers" data-count="{{len .Controllers}}" {{if .Starting}}hx-get="/tenants/{{.Name}}/controllers" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+{{define "controllers"}}<div id="controllers" data-count="{{len .Controllers}}" hx-get="/tenants/{{.Name}}/controllers" hx-trigger="every {{if .Starting}}3s{{else}}5s{{end}}, refresh" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 {{if .Controllers}}
 <table class="ctrls stack">
@@ -1548,11 +1587,11 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
     <td><strong>{{.Name}}</strong><span class="sub mono" title="{{.Image}}">{{.Image}}</span>
       {{- if or .Args .Env}}<span class="sub mono cfg" title="{{.Args}}{{if and .Args .Env}}&#10;{{end}}{{.Env}}">{{.Args}} {{.Env}}</span>{{end}}</td>
     <td class="mono small-text lims" data-label="Limits">{{or .Limits "–"}}</td>
-    <td data-label="State"><span class="state {{.Level}}">{{.State}}</span>{{if .Detail}}<span class="sub detail" title="{{.Detail}}">{{.Detail}}</span>{{end}}</td>
+    <td data-label="State"><span class="state {{.Level}}">{{.State}}</span></td>
     <td class="act"><span class="acts-row"><button class="small" data-edit="{{.Name}}" aria-label="Edit {{.Name}}" data-image="{{.Image}}" data-args="{{.Args}}" data-env="{{.Env}}"
       data-cpu="{{.CPU}}" data-memory="{{.Memory}}" data-probes="{{.Probes}}" data-webhook-port="{{.WebhookPort}}"
       data-metrics-port="{{.MetricsPort}}" data-metrics-path="{{.MetricsPath}}"{{if .MetricsHTTPS}} data-metrics-https{{end}}{{if .Private}} data-private{{end}}>{{template "ico" "edit"}}Edit</button>
-      <a class="btn small" href="#observability" data-logs="{{.Name}}">{{template "ico" "logs"}}Logs</a>
+      <a class="btn small" href="#observability" data-logs="{{.Name}}" title="Open in Observability">{{template "ico" "logs"}}Logs</a>
       {{if .Stopped}}<button class="small" hx-post="/tenants/{{$.Name}}/controllers/{{.Name}}/start" hx-target="#controllers" hx-swap="outerHTML">{{template "ico" "play"}}Start</button>
       {{else}}<button class="small" hx-post="/tenants/{{$.Name}}/controllers/{{.Name}}/stop" hx-target="#controllers" hx-swap="outerHTML"
       hx-confirm="Stop controller {{.Name}}? It's scaled to 0: nothing reconciles (and its webhooks don't answer) until you start it again. Its settings and your resources stay." data-confirm-action="Stop">{{template "ico" "pause"}}Stop</button>
@@ -1561,6 +1600,7 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
       <button class="quiet small danger" hx-delete="/tenants/{{$.Name}}/controllers/{{.Name}}" hx-target="#controllers" hx-swap="outerHTML"
       hx-confirm="Remove controller {{.Name}}? It stops and its deployment is deleted; your resources stay." data-confirm-action="Remove controller">{{template "ico" "trash"}}Remove</button></span></td>
   </tr>
+  {{if .Detail}}<tr class="ctrl-detail {{.Level}}"><td colspan="4">{{.Detail}}</td></tr>{{end}}
   {{end}}
 </table>
 {{else}}<p class="none">No controllers yet. Deploy your operator's image to start reconciling.</p>{{end}}
@@ -1574,11 +1614,11 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
     <button class="quiet small" hx-get="/tenants/{{.Tenant}}/controllers/{{.Controller}}/logs?previous=true" hx-target="#logs" hx-swap="outerHTML">Show previous run</button>{{end}}
   </div>
 </div>
-{{if .Error}}<p class="err">{{.Error}}</p>{{end}}
-<div class="code logs"><pre>{{if .Logs}}{{.Logs}}{{else if not .Error}}No output yet.{{end}}</pre></div>
+{{if .Error}}<p class="err">{{.Error}}</p>
+{{else}}<div class="code logs"><pre>{{or .Logs "No output yet."}}</pre></div>{{end}}
 </div>{{end}}
 
-{{define "tunnel"}}<div id="tunnel" data-state="{{if .Tunnel.Type}}on{{else}}off{{end}}" {{if .Tunnel.Pending}}hx-get="/tenants/{{.Name}}/tunnel" hx-trigger="every 3s" hx-swap="outerHTML"{{end}}>
+{{define "tunnel"}}<div id="tunnel" data-state="{{if .Tunnel.Type}}on{{else}}off{{end}}" hx-get="/tenants/{{.Name}}/tunnel" hx-trigger="every {{if .Tunnel.Pending}}3s{{else}}10s{{end}}, refresh" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
 {{if .Tunnel.Type}}{{with .Tunnel}}
 <div class="panel tunnel-on">
@@ -1646,7 +1686,7 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
 {{end}}
 
 
-{{define "events"}}<div id="events-list" hx-get="/tenants/{{.Name}}/events{{if .WarningsOnly}}?type=Warning{{end}}" hx-trigger="every 15s" hx-swap="outerHTML">
+{{define "events"}}<div id="events-list" hx-get="/tenants/{{.Name}}/events{{if .WarningsOnly}}?type=Warning{{end}}" hx-trigger="every 15s, refresh" hx-swap="outerHTML">
 <div class="seg" role="group" aria-label="Which events">
   <button class="small" hx-get="/tenants/{{.Name}}/events" hx-target="#events-list" hx-swap="outerHTML" aria-pressed="{{not .WarningsOnly}}">All</button><button class="small" hx-get="/tenants/{{.Name}}/events?type=Warning" hx-target="#events-list" hx-swap="outerHTML" aria-pressed="{{.WarningsOnly}}">Warnings only</button>
 </div>
