@@ -157,7 +157,7 @@ type pageData struct {
 	AtLimit             bool       // no more control planes allowed
 	AdminData           *adminData // set on the admin page
 	Tenants             []tenantView
-	Pending             bool        // some tenant has no endpoint yet: keep polling
+	Pending             bool        // some tenant has no endpoint yet: poll faster
 	Tenant              *tenantData // set on a tenant's own page
 }
 
@@ -222,6 +222,7 @@ func (w *web) routes() *http.ServeMux {
 	mux.HandleFunc("DELETE /tenants/{name}", w.authed(w.delete))
 	mux.HandleFunc("GET /tenants/{name}/kubeconfig", w.authed(w.kubeconfig))
 	mux.HandleFunc("GET /tenants/{name}", w.authed(w.tenantPage))
+	mux.HandleFunc("GET /tenants/{name}/overview", w.authed(fragment("overview", w.overview)))
 	mux.HandleFunc("GET /tenants/{name}/controllers", w.authed(fragment("controllers", w.controllers)))
 	mux.HandleFunc("POST /tenants/{name}/controllers", w.authed(w.addController))
 	mux.HandleFunc("DELETE /tenants/{name}/controllers/{controller}", w.authed(w.removeController))
@@ -797,7 +798,7 @@ type tenantData struct {
 	Events                []eventView
 	Warnings              []eventView // the newest few, for the overview
 	WarningsOnly          bool
-	Starting              bool // some controller isn't ready yet: keep polling
+	Starting              bool // some controller isn't ready yet: poll faster
 	Tunnel                tunnelView
 	Planes                []tenantView // the user's control planes, for the switcher (tenantPage)
 }
@@ -807,7 +808,7 @@ type tunnelView struct {
 	Forwards                                 string   // as typed in the form: name=host:port per line
 	Addresses                                []string // what controllers connect to, per forward
 	Targets                                  []string // host:port per forward
-	Pending                                  bool     // enabled but not up (or no connector command) yet: keep polling
+	Pending                                  bool     // enabled but not up (or no connector command) yet: poll faster
 }
 
 type controllerView struct {
@@ -875,16 +876,38 @@ func (w *web) tenantPage(rw http.ResponseWriter, r *http.Request, user string) {
 	}
 	d := w.tenantData(r.Context(), t, "")
 	d.Short = shortName(user, t.Name)
-	if t.Status.Endpoint != "" { // else there's no API server to ask yet; the page says it's starting
-		w.loadCRDs(r.Context(), t, user, d)
-		w.loadResources(r.Context(), t, user, d)
-		w.loadEvents(r.Context(), t, user, d)
-	}
+	w.loadAPI(r.Context(), t, user, d)
 	owned, _ := w.owned(r.Context(), user) // the switcher; without it the page still works
 	for _, o := range owned {
 		d.Planes = append(d.Planes, tenantView{Name: o.Name, Short: shortName(user, o.Name), Endpoint: o.Status.Endpoint})
 	}
 	w.render(rw, "page", pageData{User: user, Tenant: d, Admin: acctOf(r).Admin})
+}
+
+// loadAPI fills in what comes from the tenant's API server. Without an endpoint there's no API
+// server to ask yet; the page says it's starting.
+func (w *web) loadAPI(ctx context.Context, t *platformv1alpha1.Tenant, user string, d *tenantData) {
+	if t.Status.Endpoint != "" {
+		w.loadCRDs(ctx, t, user, d)
+		w.loadResources(ctx, t, user, d)
+		w.loadEvents(ctx, t, user, d)
+	}
+}
+
+// overview refreshes the overview view. If the API server can't be asked this time, nothing
+// changes (204): the view has nowhere to show why, and empty lists would read as "none".
+func (w *web) overview(rw http.ResponseWriter, r *http.Request, user string) {
+	t, ok := w.ownedTenant(rw, r, user)
+	if !ok {
+		return
+	}
+	d := w.tenantData(r.Context(), t, "")
+	w.loadAPI(r.Context(), t, user, d)
+	if d.Error != "" {
+		rw.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.render(rw, "overview", d)
 }
 
 func (w *web) controllers(rw http.ResponseWriter, r *http.Request, user string) {
@@ -1244,8 +1267,8 @@ func setForwards(tun *platformv1alpha1.TunnelSpec, text string) string {
 
 // controllerState reports what Kubernetes says about a controller's pods, not just ready or not:
 // the waiting/termination reason (ImagePullBackOff, CrashLoopBackOff, OOMKilled, ...), its
-// message, and restarts. A rollout whose new pod can't start while the old one serves is
-// "running", with the new pod's problem as the detail.
+// message, and restarts. A rollout whose new pod isn't up while the old one serves is described
+// by updateState.
 func (w *web) controllerState(ctx context.Context, ns, name string) (state, level, detail string) {
 	pods := &corev1.PodList{}
 	if err := w.List(ctx, pods, client.InNamespace(ns), client.MatchingLabels{labelController: name}); err != nil || len(pods.Items) == 0 {
@@ -1259,9 +1282,20 @@ func (w *web) controllerState(ctx context.Context, ns, name string) (state, leve
 	case st == "running":
 		return st, "ok", msg
 	case serving: // still works, but needs attention
-		return "running", "wait", "update not starting: " + strings.TrimSuffix(st+": "+msg, ": ")
+		return updateState(st, lvl, msg)
 	}
 	return st, lvl, msg
+}
+
+// updateState is a rollout's state while an older pod still serves, given the new pod's podState.
+// A new pod that's still on its way leaves the controller "running". One that has failed isn't
+// reported as running, so it stands out and the page polls until it's fixed.
+func updateState(st, lvl, msg string) (state, level, detail string) {
+	detail = strings.TrimSuffix(st+": "+msg, ": ")
+	if lvl == "bad" {
+		return "update failing", "bad", "The previous version is still serving. " + detail
+	}
+	return "running", "wait", "update not starting: " + detail
 }
 
 func podReady(p corev1.Pod) bool {
@@ -1395,6 +1429,10 @@ func (w *web) setTunnel(rw http.ResponseWriter, r *http.Request, user string) {
 
 func (w *web) crds(rw http.ResponseWriter, r *http.Request, user string) {
 	if t, ok := w.ownedTenant(rw, r, user); ok {
+		if t.Status.Endpoint == "" { // no API server to ask yet
+			rw.WriteHeader(http.StatusNoContent)
+			return
+		}
 		d := &tenantData{Name: t.GetName()}
 		w.loadCRDs(r.Context(), t, user, d)
 		w.render(rw, "crds", d)
@@ -1559,6 +1597,10 @@ func (w *web) tenantConfig(ctx context.Context, t *platformv1alpha1.Tenant, user
 
 func (w *web) resources(rw http.ResponseWriter, r *http.Request, user string) {
 	if t, ok := w.ownedTenant(rw, r, user); ok {
+		if t.Status.Endpoint == "" { // no API server to ask yet
+			rw.WriteHeader(http.StatusNoContent)
+			return
+		}
 		d := &tenantData{Name: t.GetName()}
 		w.loadResources(r.Context(), t, user, d)
 		w.render(rw, "resources", d)

@@ -85,6 +85,53 @@ func TestPodState(t *testing.T) {
 	}
 }
 
+func TestUpdateState(t *testing.T) {
+	for name, tc := range map[string]struct {
+		st, lvl, msg         string
+		state, level, detail string
+	}{
+		"failed":                 {"ImagePullBackOff", "bad", "not found", "update failing", "bad", "The previous version is still serving. ImagePullBackOff: not found"},
+		"failed with no message": {"CrashLoopBackOff", "bad", "", "update failing", "bad", "The previous version is still serving. CrashLoopBackOff"},
+		"still starting":         {"starting", "wait", "", "running", "wait", "update not starting: starting"},
+	} {
+		state, level, detail := updateState(tc.st, tc.lvl, tc.msg)
+		if state != tc.state || level != tc.level || detail != tc.detail {
+			t.Errorf("%s: got (%q, %q, %q), want (%q, %q, %q)", name, state, level, detail, tc.state, tc.level, tc.detail)
+		}
+	}
+}
+
+func TestListsRefreshThemselves(t *testing.T) {
+	d := &tenantData{Name: "t", Endpoint: "https://x"}
+	for name, want := range map[string]string{
+		"overview":    `hx-trigger="every 10s, refresh"`,
+		"controllers": `hx-trigger="every 5s, refresh"`,
+		"crds":        `hx-trigger="every 10s, refresh, objects-changed from:body"`,
+		"resources":   `hx-trigger="every 10s, refresh, objects-changed from:body"`,
+		"tunnel":      `hx-trigger="every 10s, refresh"`,
+		"events":      `hx-trigger="every 15s, refresh"`,
+	} {
+		var b strings.Builder
+		if err := pages.ExecuteTemplate(&b, name, d); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("%s: no %s in %s", name, want, b.String())
+		}
+	}
+	// Something on its way refreshes faster.
+	d.Starting, d.Tunnel.Pending = true, true
+	for _, name := range []string{"controllers", "tunnel"} {
+		var b strings.Builder
+		if err := pages.ExecuteTemplate(&b, name, d); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !strings.Contains(b.String(), `hx-trigger="every 3s, refresh"`) {
+			t.Errorf("%s: not polling every 3s while starting: %s", name, b.String())
+		}
+	}
+}
+
 func TestAllocate(t *testing.T) {
 	q := resource.MustParse
 	l := limits{Controllers: 2, CPU: "500m", Memory: "512Mi"}
