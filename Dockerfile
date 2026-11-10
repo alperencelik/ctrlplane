@@ -13,10 +13,10 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     go build -trimpath -ldflags=-s -o /out/platform ./cmd/platform
 
 # One image per binary: `docker build --target tenant-apiserver|platform`.
-FROM gcr.io/distroless/static:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087 AS tenant-apiserver
+FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS tenant-apiserver
 COPY --from=build /out/tenant-apiserver /
 ENTRYPOINT ["/tenant-apiserver"]
 
-FROM gcr.io/distroless/static:nonroot@sha256:516757106de35205efb70b91ba03f6f1298424a0678c603255cf2852a7000087 AS platform
+FROM gcr.io/distroless/static:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329 AS platform
 COPY --from=build /out/platform /
 ENTRYPOINT ["/platform"]
