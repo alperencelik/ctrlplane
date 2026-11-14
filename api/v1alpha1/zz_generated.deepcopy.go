@@ -263,6 +263,11 @@ func (in *TenantSpec) DeepCopyInto(out *TenantSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
+	if in.Plugins != nil {
+		in, out := &in.Plugins, &out.Plugins
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.Tunnel != nil {
 		in, out := &in.Tunnel, &out.Tunnel
 		*out = new(TunnelSpec)

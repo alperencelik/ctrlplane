@@ -136,6 +136,9 @@ var scheme = func() *runtime.Scheme {
 // +kubebuilder:rbac:groups="",resources=resourcequotas,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles;rolebindings,verbs=get;list;watch;create;update;patch;delete
+// Plugins: a tenant API server's Role in plugins-<tenant> grants their resources, which the
+// platform itself can't use (plugins.go). The scope policy keeps these to tenant-*/plugins-*.
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=escalate;bind
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=tlsroutes,verbs=get;list;watch;create;update;patch;delete
 // pods, pods/log: held so the platform may grant them (RBAC escalation check) to tenant API servers;
 // watch: the log shipper (logship.go) follows controller pods.
@@ -164,6 +167,9 @@ type reconciler struct {
 	metricsURL   string   // VictoriaMetrics, queried by tenant API servers; empty = no /platform/metrics
 	logsURL      string   // VictoriaLogs, likewise for /platform/logs
 	runtimeClass string
+	// Plugins (plugins.go): the catalog directory, and the image it comes from (for the tenant
+	// API server's init container). Empty = no plugins.
+	pluginsDir, pluginsImage string
 	// Public endpoints https://<tenantID>.<domain>[:port] via a Gateway API TLSRoute
 	// (TLS passthrough). Disabled when domain is empty.
 	domain         string
@@ -227,6 +233,14 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	nsLabels["pod-security.kubernetes.io/enforce-version"] = "latest"
 	if err := r.Apply(ctx, corev1ac.Namespace(ns).WithLabels(nsLabels).WithOwnerReferences(owner), fieldOwner, client.ForceOwnership); err != nil {
 		return ctrl.Result{}, err
+	}
+	// Before the API server: it serves the plugins' resources from there (plugins.go).
+	if err := r.applyPluginsNamespace(ctx, t.GetName(), ns, spec.Plugins, owner); err != nil {
+		return ctrl.Result{}, err
+	}
+	plugins := inCatalog(r.pluginsDir, spec.Plugins)
+	if len(plugins) < len(spec.Plugins) {
+		ctrl.LoggerFrom(ctx).Info("plugins not in the catalog are not served", "plugins", spec.Plugins, "served", plugins)
 	}
 	restoreSnap := "" // spec.restoreFrom's snapshot: the PKI and the database both come from it
 	if t.Spec.RestoreFrom != nil {
@@ -299,7 +313,7 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			WithSubjects(rbacv1ac.Subject().WithKind("ServiceAccount").WithName("apiserver").WithNamespace(ns)),
 		controllerQuota(ns, lim, spec.Controllers, owner),
 		r.apiserverService(ns, owner),
-		r.apiserverStatefulSet(ns, tenantNS, publicHost, cmp.Or(t.Annotations[apiserverImageAnno], r.apiserverImage), spec.Owners, claim, restoreSnap != "", owner),
+		r.apiserverStatefulSet(ns, tenantNS, publicHost, cmp.Or(t.Annotations[apiserverImageAnno], r.apiserverImage), spec.Owners, plugins, claim, restoreSnap != "", owner),
 	} {
 		if err := r.Apply(ctx, obj, fieldOwner, client.ForceOwnership); err != nil {
 			return ctrl.Result{}, err
@@ -313,6 +327,14 @@ func (r *reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	tunnelURL, err := r.reconcileTunnel(ctx, t.GetName(), ns, id, spec.Tunnel, ca, owner)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if len(spec.Plugins) > 0 { // their credentials, once the API server answers (before that: retry soon, not an error)
+		if err := r.syncPluginSecrets(ctx, t.GetName(), tenantNS); err != nil {
+			ctrl.LoggerFrom(ctx).Info("plugins: waiting for the tenant API server", "err", err.Error())
+			requeue = cmp.Or(requeue, 15*time.Second)
+		}
+		// shortcut: credential changes in the tenant are picked up by polling, not watched; watch the tenant's Secrets if 5 minutes is too slow
+		requeue = cmp.Or(requeue, 5*time.Minute)
 	}
 	// status.backup is the backupper's (backup.go).
 	if err := r.setStatus(ctx, t, platformv1alpha1.TenantStatus{ID: id, Endpoint: endpoint, Tunnel: tunnelURL,
@@ -659,7 +681,7 @@ func resources(res corev1.ResourceRequirements) *corev1ac.ResourceRequirementsAp
 	return ac
 }
 
-func (r *reconciler) apiserverStatefulSet(ns, tenantNS, publicHost, image string, owners []string, claim *corev1ac.PersistentVolumeClaimSpecApplyConfiguration, restore bool, owner *metav1ac.OwnerReferenceApplyConfiguration) *appsv1ac.StatefulSetApplyConfiguration {
+func (r *reconciler) apiserverStatefulSet(ns, tenantNS, publicHost, image string, owners, plugins []string, claim *corev1ac.PersistentVolumeClaimSpecApplyConfiguration, restore bool, owner *metav1ac.OwnerReferenceApplyConfiguration) *appsv1ac.StatefulSetApplyConfiguration {
 	labels := map[string]string{"app": "apiserver"}
 	pvc := &corev1ac.PersistentVolumeClaimApplyConfiguration{}
 	pvc.WithName("data").WithSpec(claim)
@@ -679,20 +701,36 @@ func (r *reconciler) apiserverStatefulSet(ns, tenantNS, publicHost, image string
 	if r.logsURL != "" {
 		args = append(args, "--logs-url="+r.logsURL)
 	}
+	apiserver := corev1ac.Container().WithName("apiserver").WithImage(image).
+		WithCommand("/tenant-apiserver").
+		WithWorkingDir("/data").
+		WithPorts(corev1ac.ContainerPort().WithName("https").WithContainerPort(apiserverPort)).
+		WithResources(resources(r.apiserverResources)).
+		WithReadinessProbe(corev1ac.Probe().WithHTTPGet(corev1ac.HTTPGetAction().
+			WithPath("/readyz").WithPort(intstr.FromInt32(apiserverPort)).WithScheme(corev1.URISchemeHTTPS))).
+		WithVolumeMounts(
+			corev1ac.VolumeMount().WithName("data").WithMountPath("/data"),
+			corev1ac.VolumeMount().WithName("pki").WithMountPath("/data/pki").WithReadOnly(true)).
+		WithSecurityContext(hardenedContainer())
 	pod := r.withPullSecrets(r.hardenedPod()).
-		WithContainers(corev1ac.Container().WithName("apiserver").WithImage(image).
-			WithCommand("/tenant-apiserver").
-			WithArgs(args...).
-			WithWorkingDir("/data").
-			WithPorts(corev1ac.ContainerPort().WithName("https").WithContainerPort(apiserverPort)).
-			WithResources(resources(r.apiserverResources)).
-			WithReadinessProbe(corev1ac.Probe().WithHTTPGet(corev1ac.HTTPGetAction().
-				WithPath("/readyz").WithPort(intstr.FromInt32(apiserverPort)).WithScheme(corev1.URISchemeHTTPS))).
-			WithVolumeMounts(
-				corev1ac.VolumeMount().WithName("data").WithMountPath("/data"),
-				corev1ac.VolumeMount().WithName("pki").WithMountPath("/data/pki").WithReadOnly(true)).
-			WithSecurityContext(hardenedContainer())).
 		WithVolumes(corev1ac.Volume().WithName("pki").WithSecret(corev1ac.SecretVolumeSource().WithSecretName("apiserver-pki")))
+	if len(plugins) > 0 { // the enabled plugins' CRDs, copied out of the catalog image (plugins.go)
+		args = append(args, "--plugin-crds-dir="+pluginCRDsPath, "--plugins-namespace="+pluginsNamespace(tenantNS))
+		var cp []string
+		for _, p := range plugins {
+			cp = append(cp, fmt.Sprintf("mkdir -p %[1]s/%[2]s && cp /plugins/%[2]s/crds.yaml %[1]s/%[2]s/", pluginCRDsPath, p))
+		}
+		mount := corev1ac.VolumeMount().WithName("plugin-crds").WithMountPath(pluginCRDsPath)
+		apiserver.WithVolumeMounts(mount)
+		pod.WithVolumes(corev1ac.Volume().WithName("plugin-crds").WithEmptyDir(corev1ac.EmptyDirVolumeSource())).
+			WithInitContainers(corev1ac.Container().WithName("plugins").WithImage(r.pluginsImage).
+				WithCommand("sh", "-ec", strings.Join(cp, "\n")).
+				WithVolumeMounts(mount).
+				WithResources(sidecarResources()).
+				WithSecurityContext(hardenedContainer()))
+	}
+	apiserver.WithArgs(args...)
+	pod.WithContainers(apiserver)
 	pod.SecurityContext.WithFSGroup(nonRootUID) // PVC must be writable by the nonroot user
 	if restore {                                // fills an empty volume from the backup (backup.go); a no-op once the database exists
 		pod.WithInitContainers(corev1ac.Container().WithName("restore").WithImage(image).
@@ -937,7 +975,7 @@ func main() {
 	}
 	if issuer != "" {
 		w := &web{Client: mgr.GetClient(), apiReader: mgr.GetAPIReader(), acct: acct, platformNS: platformNS, issuer: issuer, issuerCA: issuerCA,
-			logsURL: env("LOGS_URL", ""), metricsURL: env("METRICS_URL", "")}
+			logsURL: env("LOGS_URL", ""), metricsURL: env("METRICS_URL", ""), pluginsDir: env("PLUGINS_DIR", "")}
 		secret, url := os.Getenv("OIDC_CLIENT_SECRET"), env("WEB_URL", "")
 		err = mgr.Add(everyReplica(func(ctx context.Context) error {
 			return w.serve(ctx, env("WEB_ADDR", ":8081"), secret, url)
@@ -976,7 +1014,9 @@ func main() {
 			metricsURL:     env("METRICS_URL", ""),                                                                          // e.g. http://victoriametrics.platform-system.svc:8428
 			logsURL:        env("LOGS_URL", ""),
 			runtimeClass:   env("TENANT_RUNTIME_CLASS", ""), // e.g. gvisor; empty on kind
-			domain:         env("TENANT_DOMAIN", ""),        // e.g. api.example.com
+			pluginsDir:     env("PLUGINS_DIR", ""),          // e.g. /plugins, from PLUGINS_IMAGE (plugins.go)
+			pluginsImage:   env("PLUGINS_IMAGE", ""),
+			domain:         env("TENANT_DOMAIN", ""), // e.g. api.example.com
 			endpointPort:   env("TENANT_ENDPOINT_PORT", "443"),
 			gateway:        env("GATEWAY", "platform-system/tenants"),
 			gatewayProxyNS: env("GATEWAY_PROXY_NAMESPACE", "envoy-gateway-system"),

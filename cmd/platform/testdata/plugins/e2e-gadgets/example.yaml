@@ -1,0 +1,3 @@
+apiVersion: plugin.example.com/v1
+kind: Gadget
+metadata: {name: g1, namespace: <namespace>}

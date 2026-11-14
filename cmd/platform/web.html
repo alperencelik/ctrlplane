@@ -27,6 +27,7 @@
     --res: light-dark(#A2461A, #FFC4A3); --res-bg: light-dark(#FFE2D1, #3F2618);
     --net: light-dark(#A2461A, #FFC4A3); --net-bg: light-dark(#FFE2D1, #3F2618);
     --obs: light-dark(#1F5F99, #B2D4F5); --obs-bg: light-dark(#D9EBFB, #1A3048);
+    --plug: light-dark(#8A2D86, #F2B8EE); --plug-bg: light-dark(#F7DDF5, #3A1F39);
     --code-bg: light-dark(#211C35, #0E0C16); --code-ink: light-dark(#EEEAF7, #E6E1F0);
     --logo-line: light-dark(#211C35, #15121F);
     --display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
@@ -105,6 +106,7 @@
   .path .node.live .role { color: var(--hue, var(--wire)); font-weight: 500; }
   .hue-api { --hue: var(--api); --hue-bg: var(--api-bg); } .hue-ctrl { --hue: var(--ctrl); --hue-bg: var(--ctrl-bg); }
   .hue-res { --hue: var(--res); --hue-bg: var(--res-bg); } .hue-net { --hue: var(--net); --hue-bg: var(--net-bg); } .hue-obs { --hue: var(--obs); --hue-bg: var(--obs-bg); }
+  .hue-plug { --hue: var(--plug); --hue-bg: var(--plug-bg); }
   .path .node.dim { background: transparent; border-style: dashed; color: var(--muted); }
   .path > li:not(:last-child)::after { content: ""; position: absolute; top: 34px; right: 0; width: 20px; height: 2px; background: var(--wire); transform-origin: left; }
   .path > li.cut::after { background: repeating-linear-gradient(90deg, var(--faint) 0 4px, transparent 4px 8px) !important; }
@@ -432,7 +434,12 @@
   .panel-body { padding: 16px 18px; display: grid; gap: 10px; }
   .panel-body p { margin: 0; }
   .panel-body h4 { margin: 8px 0 0; font-size: 15px; }
-  .tunnel-on { border-color: color-mix(in srgb, var(--hue, var(--wire)) 45%, var(--rule)); }
+  .panel-head:last-child { border-bottom: 0; }
+  .plugin-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .catalog .panel { scroll-margin-top: 16px; }
+  .catalog .panel:target { border-color: var(--wire); }
+  .plugin-types { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+  .tunnel-on, .plugin-on { border-color: color-mix(in srgb, var(--hue, var(--wire)) 45%, var(--rule)); }
   .tunnel-form { padding: 20px; max-width: none; margin-top: 16px; }
   .tunnel-form h3 { margin: 0; }
   .choices.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -497,6 +504,7 @@
   <symbol id="i-api" viewBox="0 0 24 24"><path d="M8 3.5H7a2 2 0 0 0-2 2v4a2 2 0 0 1-2 2.5 2 2 0 0 1 2 2.5v4a2 2 0 0 0 2 2h1M16 3.5h1a2 2 0 0 1 2 2v4a2 2 0 0 0 2 2.5 2 2 0 0 0-2 2.5v4a2 2 0 0 1-2 2h-1"/></symbol>
   <symbol id="i-ctrl" viewBox="0 0 24 24"><path d="M20.5 12a8.5 8.5 0 0 1-14.6 5.9M3.5 12A8.5 8.5 0 0 1 18.1 6.1"/><path d="M18.5 2.5v4h-4M5.5 21.5v-4h4"/></symbol>
   <symbol id="i-obs" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+  <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0V8zM12 17v4"/></symbol>
   <symbol id="i-net" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
   <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4zM13.5 6.5l4 4"/></symbol>
   <symbol id="i-res" viewBox="0 0 24 24"><path d="M12 3 3 7.5l9 4.5 9-4.5L12 3zM3 12l9 4.5 9-4.5M3 16.5 12 21l9-4.5"/></symbol>
@@ -517,6 +525,7 @@
 <main>
 {{if .AdminData}}{{template "admin" .AdminData}}
 {{else if .Tenant}}{{template "tenant" .Tenant}}
+{{else if .Catalog}}{{template "catalog" .Catalog}}
 {{else if .Notice}}
 <div class="hero"><h1 class="page-title">Not yet</h1><p>{{.Notice}}</p>
 <form method="post" action="/logout"><button>Sign out</button></form></div>
@@ -535,7 +544,8 @@
   </form>
 </dialog>
 <p class="connect">From your terminal: <code>brew install alperencelik/tap/ctrlplane</code>, then <code>ctrlplane login</code> and <code>ctrlplane use &lt;name&gt;</code>.
-Prefer a plain kubeconfig? See <a href="https://docs.ctrlplane.run/use/access/">Access</a>.</p>
+Prefer a plain kubeconfig? See <a href="https://docs.ctrlplane.run/use/access/">Access</a>.
+{{if .PluginCatalog}}Ready-made operators: see the <a href="/plugins">plugin catalog</a>.{{end}}</p>
 {{else}}
 <div class="hero">
   <h1>Run your operators without running a cluster.</h1>
@@ -1149,12 +1159,13 @@ document.addEventListener("click", e => {
   document.addEventListener("visibilitychange", () => document.hidden || refresh());
   // The side navigation follows the lists it counts (each list says its own count), and the
   // overview, which has all of them.
-  const navCounts = { controllers: "nav-n-ctrl", crds: "nav-n-api", resources: "nav-n-res" };
+  const navCounts = { controllers: "nav-n-ctrl", crds: "nav-n-api", resources: "nav-n-res", plugins: "nav-n-plug" };
+  const setCount = (id, n) => { const el = document.getElementById(id); if (el && n !== undefined) el.textContent = n; }; // nav-n-plug: only with a catalog
   document.addEventListener("htmx:afterSwap", e => {
     const id = e.detail.target.id, data = document.getElementById(id)?.dataset;
-    if (id in navCounts && data?.count !== undefined) document.getElementById(navCounts[id]).textContent = data.count;
+    if (id in navCounts) setCount(navCounts[id], data?.count);
     if (id !== "overview" || !data) return;
-    for (const k in navCounts) document.getElementById(navCounts[k]).textContent = data[k];
+    for (const k in navCounts) setCount(navCounts[k], data[k]);
     const warn = document.getElementById("nav-n-warn");
     warn.textContent = data.warnings;
     warn.hidden = data.warnings === "0";
@@ -1266,6 +1277,7 @@ document.addEventListener("click", e => {
   <a href="#api" data-view="api" class="hue-api">{{template "ico" "api"}}API <span class="n" id="nav-n-api">{{len .CRDs}}</span></a>
   <a href="#resources" data-view="resources" class="hue-res">{{template "ico" "res"}}Resources <span class="n" id="nav-n-res">{{.ResourceCount}}</span></a>
   <a href="#controllers" data-view="controllers" class="hue-ctrl">{{template "ico" "ctrl"}}Controllers <span class="n" id="nav-n-ctrl">{{len .Controllers}}</span></a>
+  {{if .Plugins}}<a href="#plugins" data-view="plugins" class="hue-plug">{{template "ico" "plug"}}Plugins <span class="n" id="nav-n-plug" title="Turned on">{{.PluginsOn}}</span></a>{{end}}
   <a href="#observability" data-view="observability" class="hue-obs">{{template "ico" "obs"}}Observability <span class="n warn" id="nav-n-warn" title="Warnings in the last hour"{{if not .Warnings}} hidden{{end}}>{{len .Warnings}}</span></a>
   <a href="#network" data-view="network" class="hue-net">{{template "ico" "net"}}Network <span class="n">{{if .Tunnel.Type}}on{{else}}off{{end}}</span></a>
 </nav>
@@ -1274,7 +1286,7 @@ document.addEventListener("click", e => {
 <section class="view" id="view-overview">
   <h2 class="view-title">{{template "ico" "overview"}}Overview</h2>
   {{block "overview" .}}<div id="overview" {{if .Endpoint}}hx-get="/tenants/{{.Name}}/overview" hx-trigger="every 10s, refresh" hx-swap="outerHTML"{{end}}
-    data-crds="{{len .CRDs}}" data-resources="{{.ResourceCount}}" data-controllers="{{len .Controllers}}" data-warnings="{{len .Warnings}}" data-tunnel="{{if .Tunnel.Type}}on{{else}}off{{end}}">
+    data-crds="{{len .CRDs}}" data-resources="{{.ResourceCount}}" data-controllers="{{len .Controllers}}" data-plugins="{{.PluginsOn}}" data-warnings="{{len .Warnings}}" data-tunnel="{{if .Tunnel.Type}}on{{else}}off{{end}}">
   <ol class="path" aria-label="How requests reach your network">
     <li><div class="node"><span class="role">You</span><span class="what">kubectl</span><span class="via">or this page</span></div></li>
     <li><div class="node live hue-api"><span class="role">API server</span><span class="what">{{len .CRDs}} API {{if eq (len .CRDs) 1}}type{{else}}types{{end}}</span>
@@ -1473,6 +1485,12 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
   </details>
 </section>
 
+{{if .Plugins}}<section class="view hue-plug" id="view-plugins" hidden>
+  <h2 class="view-title hue-plug">{{template "ico" "plug"}}Plugins</h2>
+  <p class="about">Operators ctrlplane runs for you, ready-made. Turn one on and its API types appear in this control plane, read-only: create its resources in namespace <code>{{.Name}}</code> and the operator reconciles them. For its credentials, label your Secret <code>plugins.ctrlplane.run/copy=true</code>. Turning one on or off restarts this control plane's API server for a few seconds. Each plugin's API types and an example: <a href="/plugins?ns={{.Name}}">plugin catalog</a>.</p>
+  {{template "plugins" .}}
+</section>{{end}}
+
 <section class="view hue-net" id="view-network" hidden>
   <h2 class="view-title hue-net">{{template "ico" "net"}}Network</h2>
   <p class="about">How your controllers reach your own network, for example a database or an API on your LAN. They get <code>HTTPS_PROXY</code> pointing at the tunnel; this control plane itself stays direct.</p>
@@ -1501,25 +1519,28 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
 
 {{define "resources"}}<div id="resources"{{if not .Error}} data-count="{{.ResourceCount}}"{{end}} hx-get="/tenants/{{.Name}}/resources" hx-trigger="every 10s, refresh, objects-changed from:body" hx-swap="outerHTML">
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
-{{range .Kinds}}{{$k := .}}
+{{range .Kinds}}{{template "kind" .}}
+{{else}}<p class="none">No API types yet: add your operator's CRDs under <a href="#api">API</a> first.</p>{{end}}
+</div>{{end}}
+
+{{define "kind"}}{{$k := .}}
 <details class="kind" data-type="{{.Kind}} {{.Resource}}.{{.Group}}" data-n="{{len .Rows}}"{{if or .Rows .Error}} open{{end}}>
   <summary class="kind-head"><h3>{{.Kind}}</h3><span class="n">{{len .Rows}}</span><span class="muted small-text mono">{{.Resource}}.{{.Group}}</span>
-    <button class="quiet small" hx-get="/tenants/{{$.Name}}/resources" hx-target="#resources" hx-swap="outerHTML" title="Refresh">{{template "ico" "refresh"}}<span class="sr">Refresh</span></button></summary>
+    <button class="quiet small" hx-get="/tenants/{{.Tenant}}/{{if .Plugin}}plugins{{else}}resources{{end}}" hx-target="#{{if .Plugin}}plugins{{else}}resources{{end}}" hx-swap="outerHTML" title="Refresh">{{template "ico" "refresh"}}<span class="sr">Refresh</span></button></summary>
   {{if .Error}}<p class="err">{{.Error}}</p>
   {{else if .Rows}}<div class="table-wrap"><table class="kt">
     <tr>{{if .Namespaced}}<th><button class="sort" type="button">NAMESPACE</button></th>{{end}}<th><button class="sort" type="button">NAME</button></th>{{range .Columns}}<th><button class="sort" type="button">{{.}}</button></th>{{end}}<th><span class="sr">Actions</span></th></tr>
     {{range .Rows}}<tr data-name="{{.Namespace}}/{{.Name}}">
       {{if $k.Namespaced}}<td class="mono">{{.Namespace}}</td>{{end}}
-      <td><button class="link mono" hx-get="/tenants/{{$.Name}}/object?group={{$k.Group | urlquery}}&version={{$k.Version | urlquery}}&resource={{$k.Resource | urlquery}}&namespace={{.Namespace | urlquery}}&name={{.Name | urlquery}}" hx-target="#object" hx-swap="outerHTML">{{.Name}}</button></td>
+      <td><button class="link mono" hx-get="/tenants/{{$k.Tenant}}/object?group={{$k.Group | urlquery}}&version={{$k.Version | urlquery}}&resource={{$k.Resource | urlquery}}&namespace={{.Namespace | urlquery}}&name={{.Name | urlquery}}" hx-target="#object" hx-swap="outerHTML">{{.Name}}</button></td>
       {{range .Cells}}<td class="mono">{{.}}</td>{{end}}
-      <td class="act"><button class="quiet small danger" hx-delete="/tenants/{{$.Name}}/resources?group={{$k.Group | urlquery}}&version={{$k.Version | urlquery}}&resource={{$k.Resource | urlquery}}&namespace={{.Namespace | urlquery}}&name={{.Name | urlquery}}"
+      <td class="act"><button class="quiet small danger" hx-delete="/tenants/{{$k.Tenant}}/resources?group={{$k.Group | urlquery}}&version={{$k.Version | urlquery}}&resource={{$k.Resource | urlquery}}&namespace={{.Namespace | urlquery}}&name={{.Name | urlquery}}"
         hx-target="#resources" hx-swap="outerHTML" hx-confirm="Delete {{$k.Kind}} {{.Name}}? Your controllers see it go." data-confirm-action="Delete {{$k.Kind}}">{{template "ico" "trash"}}Delete</button></td>
     </tr>{{end}}
   </table></div>
   {{else}}<p class="none">No {{.Kind}} objects yet.</p>{{end}}
 </details>
-{{else}}<p class="none">No API types yet: add your operator's CRDs under <a href="#api">API</a> first.</p>{{end}}
-</div>{{end}}
+{{end}}
 
 {{define "object"}}<div id="object" class="obj">
   <h2 class="sheet-title">{{or .Kind "Object"}} <code>{{.Name}}</code></h2>
@@ -1605,6 +1626,53 @@ kubectl --kubeconfig {{.Name}}.kubeconfig -n {{.Name}} create token grafana --du
 </table>
 {{else}}<p class="none">No controllers yet. Deploy your operator's image to start reconciling.</p>{{end}}
 </div>{{end}}
+
+{{define "plugins"}}<div id="plugins" data-count="{{.PluginsOn}}" hx-get="/tenants/{{.Name}}/plugins" hx-trigger="every {{if .Starting}}3s{{else}}10s{{end}}, refresh, objects-changed from:body" hx-swap="outerHTML">
+{{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+<ul class="plugin-list">{{range .Plugins}}
+  <li class="panel{{if .On}} plugin-on{{end}}">
+    <div class="panel-head">
+      <div class="kind"><strong>{{.Name}}{{if .On}} <span class="state ok">on</span>{{end}}</strong><span class="sub">{{.Description}}</span></div>
+      <span class="acts-row"><a class="btn small quiet" href="/plugins?ns={{$.Name}}#{{.Name}}">How to use</a>
+      {{if .On}}<button class="quiet small danger" hx-delete="/tenants/{{$.Name}}/plugins/{{.Name}}" hx-target="#plugins" hx-swap="outerHTML"
+        hx-confirm="Turn off {{.Name}}? Its API types go away (it refuses while you still have their resources). The API server restarts." data-confirm-action="Turn off">{{template "ico" "trash"}}Turn off</button>
+      {{else}}<button class="small" hx-post="/tenants/{{$.Name}}/plugins/{{.Name}}" hx-target="#plugins" hx-swap="outerHTML"
+        hx-confirm="Turn on {{.Name}}? Its API types appear in this control plane, and the API server restarts." data-confirm-action="Turn on">{{template "ico" "play"}}Turn on</button>{{end}}</span>
+    </div>
+    {{if and .On .Kinds}}<div class="panel-body">
+      {{range .Kinds}}{{if or .Rows .Error}}{{template "kind" .}}{{end}}{{end}}
+      <details class="opt"><summary>{{len .Kinds}} API {{if eq (len .Kinds) 1}}type{{else}}types{{end}} · {{.Objects}} {{if eq .Objects 1}}object{{else}}objects{{end}}</summary>
+        <ul class="plugin-types">{{range .Kinds}}<li><strong>{{.Kind}}</strong> <span class="muted mono small-text">{{.Resource}}.{{.Group}}</span></li>{{end}}</ul>
+      </details>
+    </div>{{end}}
+  </li>{{end}}
+</ul>
+</div>{{end}}
+
+{{define "catalog"}}<nav class="crumbs" aria-label="Breadcrumb"><a class="crumb" href="/">Control planes</a><span aria-hidden="true">/</span><span class="here" aria-current="page">Plugin catalog</span></nav>
+<h1 class="page-title">Plugin catalog</h1>
+<p class="lede">Operators ctrlplane runs for you, ready-made. Turn one on in a control plane, under <strong>Plugins</strong>. Its API types then appear there, read-only. Create its resources in your namespace and the operator reconciles them. Give it credentials with a Secret labeled <code>plugins.ctrlplane.run/copy=true</code>.</p>
+{{if .Error}}<p class="err">{{.Error}}</p>{{end}}
+<ul class="plugin-list catalog">{{range .Plugins}}
+  <li class="panel{{if .On}} plugin-on{{end}}" id="{{.Name}}">
+    <div class="panel-head">
+      <div class="kind"><strong>{{.Name}}</strong><span class="sub">{{.Description}}</span></div>
+      <span class="acts-row">{{if .Guide}}<a class="btn small quiet" href="{{.Guide}}" target="_blank" rel="noopener">Guide</a>{{end}}{{if .Docs}}<a class="btn small quiet" href="{{.Docs}}" target="_blank" rel="noopener">API reference</a>{{end}}</span>
+    </div>
+    <div class="panel-body">
+      <p>{{if .On}}On in {{range $i, $p := .On}}{{if $i}}, {{end}}<a href="/tenants/{{$p.Name}}#plugins">{{$p.Short}}</a>{{end}}.
+        {{else if $.Planes}}Turn it on in {{range $i, $p := $.Planes}}{{if $i}}, {{end}}<a href="/tenants/{{$p.Name}}#plugins">{{$p.Short}}</a>{{end}}: open <strong>Plugins</strong>, then <strong>Turn on</strong>.
+        {{else}}Create a control plane first. Then turn it on under <strong>Plugins</strong>.{{end}}</p>
+      <details class="opt"><summary>{{len .Types}} API {{if eq (len .Types) 1}}type{{else}}types{{end}}</summary>
+        <ul class="plugin-types">{{range .Types}}<li><strong>{{.Kind}}</strong> <span class="muted mono small-text">{{.Group}}/{{.Version}}</span></li>{{end}}</ul>
+      </details>
+      {{if .Example}}<details class="opt" open><summary>Example, for namespace <code>{{$.Namespace}}</code></summary>
+        <div class="code"><button class="copy small" data-copy="{{.Example}}">Copy</button><pre>{{.Example}}</pre></div>
+      </details>{{end}}
+    </div>
+  </li>{{else}}<li class="muted">This hosting has no plugins.</li>{{end}}
+</ul>
+{{end}}
 
 {{define "logs"}}<div id="logs" hx-get="/tenants/{{.Tenant}}/controllers/{{.Controller}}/logs{{if .Previous}}?previous=true{{end}}" hx-trigger="every 3s" hx-swap="outerHTML">
 <div class="logs-head">

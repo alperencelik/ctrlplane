@@ -52,7 +52,7 @@ func main() {
 	// ponytail: sqlite per tenant; pass postgres://… to share one DB server.
 	datastore := "sqlite://./tenant.db?_journal=WAL&cache=shared&_busy_timeout=30000"
 	hosts := []string{"localhost", "127.0.0.1"}
-	var tenantNS, hostNS, metricsURL, logsURL string
+	var tenantNS, hostNS, metricsURL, logsURL, pluginCRDs, pluginsNS string
 	var owners []string
 
 	// Secure defaults backed by ensurePKI; every one is still overridable by its flag.
@@ -82,7 +82,9 @@ func main() {
 				return fmt.Errorf("pki: %w", err)
 			}
 
-			etcd, err := endpoint.Listen(ctx, endpoint.Config{
+			// Not ctx: kine must outlive SIGTERM, or the API server drains against no storage and
+			// hangs every request until the kubelet kills it (it dies with the process anyway).
+			etcd, err := endpoint.Listen(context.WithoutCancel(ctx), endpoint.Config{
 				Listener:            "unix://kine.sock",
 				Endpoint:            datastore,
 				NotifyInterval:      5 * time.Second,
@@ -92,6 +94,7 @@ func main() {
 				CompactMinRetain:    1000,
 				CompactBatchSize:    1000,
 				PollBatchSize:       500,
+				PollInterval:        time.Second, // kine 0.17.3+ refuses zero (its CLI default)
 			})
 			if err != nil {
 				return fmt.Errorf("kine: %w", err)
@@ -109,7 +112,7 @@ func main() {
 			if rest, ok := strings.CutPrefix(datastore, "sqlite://"); ok {
 				dbPath, _, _ = strings.Cut(rest, "?")
 			}
-			return run(ctx, completed, tenantNS, hostNS, metricsURL, logsURL, dbPath, owners)
+			return run(ctx, completed, tenantNS, hostNS, metricsURL, logsURL, dbPath, pluginCRDs, pluginsNS, owners)
 		},
 	}
 
@@ -122,6 +125,8 @@ func main() {
 	fss.FlagSet("tenant").StringSliceVar(&owners, "tenant-owners", nil, "usernames (as authenticated, e.g. github:alice) that manage CRDs and everything in --tenant-namespace")
 	fss.FlagSet("tenant").StringVar(&hostNS, "host-namespace", "", "host-cluster namespace of this tenant; if set, serves /platform/controllers[/<name>/logs] using the in-cluster ServiceAccount")
 	fss.FlagSet("tenant").StringVar(&metricsURL, "metrics-url", "", "VictoriaMetrics URL; with --host-namespace, serves /platform/metrics/api/v1/... restricted to that namespace's series")
+	fss.FlagSet("tenant").StringVar(&pluginCRDs, "plugin-crds-dir", "", "directory of plugin CRDs (<dir>/<plugin>/*.yaml), served read-only on top of the tenant's own (see crdoverlay.go)")
+	fss.FlagSet("tenant").StringVar(&pluginsNS, "plugins-namespace", "", "host namespace of the plugins' resources, reached with the in-cluster ServiceAccount (see pluginproxy.go)")
 	fss.FlagSet("tenant").StringVar(&logsURL, "logs-url", "", "VictoriaLogs URL; with --host-namespace, serves /platform/logs/select/logsql/... restricted to that namespace's streams")
 	for _, fs := range fss.FlagSets {
 		cmd.Flags().AddFlagSet(fs)
@@ -130,12 +135,12 @@ func main() {
 }
 
 // run mirrors samples/generic/server.Run, plus a post-start hook for controllers.
-func run(ctx context.Context, opts options.CompletedOptions, tenantNS, hostNS, metricsURL, logsURL, dbPath string, owners []string) error {
+func run(ctx context.Context, opts options.CompletedOptions, tenantNS, hostNS, metricsURL, logsURL, dbPath, pluginCRDs, pluginsNS string, owners []string) error {
 	ca, err := os.ReadFile(pkiPath("ca.crt"))
 	if err != nil {
 		return err
 	}
-	config, err := newConfig(opts, tenantNS, hostNS, ca)
+	config, err := newConfig(opts, tenantNS, hostNS, pluginCRDs, pluginsNS, ca)
 	if err != nil {
 		return err
 	}

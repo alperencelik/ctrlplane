@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apiserver/pkg/admission"
 	webhookinit "k8s.io/apiserver/pkg/admission/plugin/webhook/initializer"
+	genericapiserver "k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/util/webhook"
 	"k8s.io/client-go/rest"
 	aggregatorscheme "k8s.io/kube-aggregator/pkg/apiserver/scheme"
@@ -27,8 +30,10 @@ import (
 // newConfig is samples/generic/server.NewConfig with this tenant's webhook wiring: service
 // references resolve to the platform's Services in the host namespace (tenantServices), and
 // their certs are checked against the tenant CA too (withCA), so a webhook configuration or CRD
-// pointing at ctrl-<controller>-webhook needs no caBundle. Without hostNS (standalone), upstream's.
-func newConfig(opts options.CompletedOptions, tenantNS, hostNS string, ca []byte) (*server.Config, error) {
+// pointing at ctrl-<controller>-webhook needs no caBundle. Plugin CRDs (pluginCRDs, a directory)
+// are served on top of the tenant's own (crdoverlay.go), their resources from the host namespace
+// pluginsNS (pluginproxy.go). Without hostNS (standalone), upstream's.
+func newConfig(opts options.CompletedOptions, tenantNS, hostNS, pluginCRDs, pluginsNS string, ca []byte) (*server.Config, error) {
 	if hostNS == "" {
 		return server.NewConfig(opts)
 	}
@@ -62,8 +67,33 @@ func newConfig(opts options.CompletedOptions, tenantNS, hostNS string, ca []byte
 	if c.APIExtensions, err = controlplaneapiserver.CreateAPIExtensionsConfig(*kubeAPIs.Generic, kubeAPIs.VersionedInformers, pluginInitializer, opts, 3, services, conversionResolver); err != nil {
 		return nil, err
 	}
+	var proxy func(http.Handler) http.Handler
+	if pluginCRDs != "" {
+		crds, err := loadPluginCRDs(pluginCRDs)
+		if err != nil {
+			return nil, fmt.Errorf("plugin CRDs: %w", err)
+		}
+		// The CRD store's own getter (CreateAPIExtensionsConfig makes it fresh); ExtraConfig's is the custom resources'.
+		c.APIExtensions.GenericConfig.RESTOptionsGetter = pluginCRDStorage(c.APIExtensions.GenericConfig.RESTOptionsGetter, crds)
+		if pluginsNS == "" {
+			return nil, errors.New("--plugin-crds-dir needs --plugins-namespace")
+		}
+		host, err := rest.InClusterConfig()
+		if err != nil {
+			return nil, fmt.Errorf("plugins need in-cluster credentials: %w", err)
+		}
+		if proxy, err = newPluginProxy(crds, tenantNS, pluginsNS, host); err != nil {
+			return nil, err
+		}
+	}
 	if c.Aggregator, err = controlplaneapiserver.CreateAggregatorConfig(*kubeAPIs.Generic, opts, kubeAPIs.VersionedInformers, services, kubeAPIs.ProxyTransport, kubeAPIs.Extra.PeerProxy, pluginInitializer); err != nil {
 		return nil, err
+	}
+	if proxy != nil { // innermost, so after authentication and authorization; the aggregator is the outermost server
+		chain := c.Aggregator.GenericConfig.BuildHandlerChainFunc
+		c.Aggregator.GenericConfig.BuildHandlerChainFunc = func(h http.Handler, gc *genericapiserver.Config) http.Handler {
+			return chain(proxy(h), gc)
+		}
 	}
 	c.Aggregator.ExtraConfig.DisableRemoteAvailableConditionController = true
 	return c, nil

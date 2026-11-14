@@ -727,6 +727,16 @@ spec:
                   pattern: ^[a-z0-9-]+:.+$
                   type: string
                 type: array
+              plugins:
+                description: |-
+                  Plugins turned on: operators the hosting runs on the host. Their CRDs are served read-only
+                  by the API server, their resources kept in host namespace plugins-<name> (see cmd/platform/plugins.go)
+                items:
+                  pattern: ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$
+                  type: string
+                maxItems: 20
+                type: array
+                x-kubernetes-list-type: set
               restoreFrom:
                 description: Restore this tenant from a backup of a tenant.
                 properties:

@@ -18,6 +18,8 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	platformv1alpha1 "github.com/alperencelik/ctrlplane/api/v1alpha1"
 )
@@ -304,4 +306,24 @@ func TestBearerJSON(t *testing.T) {
 		t.Fatalf("fragment in a browser: %d", rec.Code)
 	}
 	expect("delete", do("DELETE", "/tenants/cli-dev", "", cli...), 200, `{"name":"cli-dev"}`)
+}
+
+// The catalog lists each plugin with its types and example, the example in the asked namespace
+// only when it's one of the user's control planes, and where the plugin is on.
+func TestCatalog(t *testing.T) {
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&platformv1alpha1.Tenant{ObjectMeta: metav1.ObjectMeta{Name: "alice-dev"}, Spec: platformv1alpha1.TenantSpec{Owners: []string{"alice"}, Plugins: []string{"e2e-gadgets"}}},
+		&platformv1alpha1.Tenant{ObjectMeta: metav1.ObjectMeta{Name: "bob-dev"}, Spec: platformv1alpha1.TenantSpec{Owners: []string{"bob"}}},
+	).Build()
+	w := &web{Client: c, pluginsDir: "testdata/plugins"}
+	for ns, want := range map[string]string{"alice-dev": "namespace: alice-dev", "bob-dev": "namespace: &lt;namespace&gt;"} {
+		rec := httptest.NewRecorder()
+		w.catalog(rec, httptest.NewRequest("GET", "/plugins?ns="+ns, nil), "alice")
+		body := rec.Body.String()
+		for _, s := range []string{`id="e2e-gadgets"`, "<strong>Gadget</strong>", want, `On in <a href="/tenants/alice-dev#plugins">`} {
+			if !strings.Contains(body, s) {
+				t.Errorf("?ns=%s: no %s in %s", ns, s, body)
+			}
+		}
+	}
 }
