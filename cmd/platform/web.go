@@ -23,6 +23,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -93,6 +95,7 @@ type web struct {
 	verifier   *oidc.IDTokenVerifier
 	// The stores of tenants' logs and metrics (empty: none), to tell a name still in use there.
 	logsURL, metricsURL string
+	pluginsDir          string // the plugin catalog (plugins.go); empty = no plugins
 }
 
 type tenantView struct {
@@ -157,8 +160,10 @@ type pageData struct {
 	AtLimit             bool       // no more control planes allowed
 	AdminData           *adminData // set on the admin page
 	Tenants             []tenantView
-	Pending             bool        // some tenant has no endpoint yet: poll faster
-	Tenant              *tenantData // set on a tenant's own page
+	Pending             bool         // some tenant has no endpoint yet: poll faster
+	Tenant              *tenantData  // set on a tenant's own page
+	Catalog             *catalogData // set on the plugin catalog page
+	PluginCatalog       bool         // the hosting has plugins: link the catalog
 }
 
 // Initial is the signed-in user's first letter, for the avatar in the top bar.
@@ -230,6 +235,10 @@ func (w *web) routes() *http.ServeMux {
 	mux.HandleFunc("POST /tenants/{name}/controllers/{controller}/stop", w.authed(w.stopController(true)))
 	mux.HandleFunc("POST /tenants/{name}/controllers/{controller}/start", w.authed(w.stopController(false)))
 	mux.HandleFunc("GET /tenants/{name}/controllers/{controller}/logs", w.authed(fragment("controllers", w.controllerLogs)))
+	mux.HandleFunc("GET /plugins", w.authed(w.catalog))
+	mux.HandleFunc("GET /tenants/{name}/plugins", w.authed(fragment("plugins", w.plugins)))
+	mux.HandleFunc("POST /tenants/{name}/plugins/{plugin}", w.authed(w.setPlugin(true)))
+	mux.HandleFunc("DELETE /tenants/{name}/plugins/{plugin}", w.authed(w.setPlugin(false)))
 	mux.HandleFunc("GET /tenants/{name}/metrics/{api}", w.authed(w.metrics))
 	mux.HandleFunc("GET /tenants/{name}/logs/{api}", w.authed(w.logs))
 	mux.HandleFunc("GET /tenants/{name}/events", w.authed(fragment("observability", w.events)))
@@ -745,7 +754,7 @@ func (w *web) owned(ctx context.Context, user string) ([]platformv1alpha1.Tenant
 // data is the home page: the account's limits and the user's control planes with their quotas.
 func (w *web) data(ctx context.Context, user, msg string, acct account) pageData {
 	d := pageData{User: user, Prefix: namePrefix(user), Error: msg, Admin: acct.Admin, Limits: acct.Limits,
-		MaxControllers: maxControllers(acct.Limits)}
+		MaxControllers: maxControllers(acct.Limits), PluginCatalog: w.pluginsDir != ""}
 	owned, err := w.owned(ctx, user)
 	if err != nil {
 		d.Error = err.Error()
@@ -798,7 +807,9 @@ type tenantData struct {
 	Events                []eventView
 	Warnings              []eventView // the newest few, for the overview
 	WarningsOnly          bool
-	Starting              bool // some controller isn't ready yet: poll faster
+	Starting              bool         // some controller isn't ready yet: poll faster
+	Plugins               []pluginView // the catalog, with what's on
+	PluginsOn             int
 	Tunnel                tunnelView
 	Planes                []tenantView // the user's control planes, for the switcher (tenantPage)
 }
@@ -826,6 +837,13 @@ type controllerView struct {
 	Detail                 string // Kubernetes' message, restarts, last crash
 }
 
+type pluginView struct {
+	Name, Description, Docs, Guide string
+	On                             bool
+	Kinds                          []kindTable // its types and their objects, when on (loadPluginKinds)
+	Objects                        int
+}
+
 type eventView struct {
 	Age, Type, Object, Reason, Note, By string
 	Count                               int32
@@ -835,6 +853,7 @@ type eventView struct {
 // (NAME, the CRD's printer columns, AGE), plus NAMESPACE for namespaced types. Lists never show
 // specs (they can hold credentials); opening an object does.
 type kindTable struct {
+	Tenant, Plugin                 string // Plugin: the plugin the type comes with, or ""
 	Kind, Group, Version, Resource string
 	Namespaced                     bool
 	Columns                        []string // after NAME
@@ -877,6 +896,7 @@ func (w *web) tenantPage(rw http.ResponseWriter, r *http.Request, user string) {
 	d := w.tenantData(r.Context(), t, "")
 	d.Short = shortName(user, t.Name)
 	w.loadAPI(r.Context(), t, user, d)
+	w.loadPluginKinds(r.Context(), t, user, d)
 	owned, _ := w.owned(r.Context(), user) // the switcher; without it the page still works
 	for _, o := range owned {
 		d.Planes = append(d.Planes, tenantView{Name: o.Name, Short: shortName(user, o.Name), Endpoint: o.Status.Endpoint})
@@ -889,7 +909,7 @@ func (w *web) tenantPage(rw http.ResponseWriter, r *http.Request, user string) {
 func (w *web) loadAPI(ctx context.Context, t *platformv1alpha1.Tenant, user string, d *tenantData) {
 	if t.Status.Endpoint != "" {
 		w.loadCRDs(ctx, t, user, d)
-		w.loadResources(ctx, t, user, d)
+		w.loadResources(ctx, t, user, d, false)
 		w.loadEvents(ctx, t, user, d)
 	}
 }
@@ -913,6 +933,94 @@ func (w *web) overview(rw http.ResponseWriter, r *http.Request, user string) {
 func (w *web) controllers(rw http.ResponseWriter, r *http.Request, user string) {
 	if t, ok := w.ownedTenant(rw, r, user); ok {
 		w.render(rw, "controllers", w.tenantData(r.Context(), t, ""))
+	}
+}
+
+func (w *web) plugins(rw http.ResponseWriter, r *http.Request, user string) {
+	if t, ok := w.ownedTenant(rw, r, user); ok {
+		d := w.tenantData(r.Context(), t, "")
+		if wantsJSON(r) { // ctrlplane plugins
+			type plugin struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Docs        string `json:"docs,omitempty"`
+				Guide       string `json:"guide,omitempty"`
+				On          bool   `json:"on"`
+			}
+			ps := []plugin{}
+			for _, p := range d.Plugins {
+				ps = append(ps, plugin{p.Name, p.Description, p.Docs, p.Guide, p.On})
+			}
+			reply(rw, d.Error, map[string]any{"plugins": ps})
+			return
+		}
+		w.loadPluginKinds(r.Context(), t, user, d)
+		w.render(rw, "plugins", d)
+	}
+}
+
+type catalogData struct {
+	Error     string
+	Namespace string       // in the examples: ?ns=, one of the user's tenants, or a placeholder
+	Planes    []tenantView // the user's control planes, to turn a plugin on in
+	Plugins   []catalogEntry
+}
+
+type catalogEntry struct {
+	Name, Description, Docs, Guide, Example string
+	Types                                   []pluginCRD
+	On                                      []tenantView // the user's control planes that have it on
+}
+
+// catalog is the plugin catalog page: each plugin with its API types, an example and its docs.
+// Turning one on is per control plane, in its Plugins view.
+func (w *web) catalog(rw http.ResponseWriter, r *http.Request, user string) {
+	d := &catalogData{Namespace: "<namespace>"}
+	owned, err := w.owned(r.Context(), user)
+	if err != nil {
+		d.Error = err.Error()
+	}
+	for _, t := range owned {
+		d.Planes = append(d.Planes, tenantView{Name: t.Name, Short: shortName(user, t.Name)})
+		if t.Name == r.URL.Query().Get("ns") {
+			d.Namespace = t.Name
+		}
+	}
+	all, err := listPlugins(w.pluginsDir)
+	if err != nil {
+		d.Error = err.Error()
+	}
+	for _, p := range all {
+		e := catalogEntry{Name: p.Name(), Description: p.Spec.Description, Docs: p.Spec.Docs, Guide: p.Spec.Guide}
+		if e.Types, err = pluginCRDs(w.pluginsDir, p.Name()); err != nil {
+			d.Error = err.Error()
+		}
+		if b, err := os.ReadFile(filepath.Join(w.pluginsDir, p.Name(), "example.yaml")); err == nil {
+			e.Example = strings.ReplaceAll(string(b), "<namespace>", d.Namespace)
+		}
+		for i, t := range owned {
+			if slices.Contains(t.Spec.Plugins, p.Name()) {
+				e.On = append(e.On, d.Planes[i])
+			}
+		}
+		d.Plugins = append(d.Plugins, e)
+	}
+	w.render(rw, "page", pageData{User: user, Admin: acctOf(r).Admin, Catalog: d})
+}
+
+// loadPluginKinds puts the turned-on plugins' types, with their objects, under their plugins.
+func (w *web) loadPluginKinds(ctx context.Context, t *platformv1alpha1.Tenant, user string, d *tenantData) {
+	if t.Status.Endpoint == "" || d.PluginsOn == 0 {
+		return
+	}
+	all := &tenantData{}
+	w.loadResources(ctx, t, user, all, true)
+	d.Error = cmp.Or(d.Error, all.Error)
+	for _, k := range all.Kinds {
+		if i := slices.IndexFunc(d.Plugins, func(p pluginView) bool { return p.Name == k.Plugin }); i >= 0 {
+			d.Plugins[i].Kinds = append(d.Plugins[i].Kinds, k)
+			d.Plugins[i].Objects += len(k.Rows)
+		}
 	}
 }
 
@@ -1141,6 +1249,78 @@ func (w *web) stopController(stop bool) func(http.ResponseWriter, *http.Request,
 	}
 }
 
+// setPlugin turns a plugin on or off (spec.plugins). On: not over a CRD of the tenant's own in the
+// plugin's groups (it would be hidden). Off: not while its resources exist (they'd be stranded on
+// the host, out of the tenant's reach). Either way the tenant API server restarts with the new CRD
+// set (plugins.go).
+func (w *web) setPlugin(on bool) func(http.ResponseWriter, *http.Request, string) {
+	return func(rw http.ResponseWriter, r *http.Request, user string) {
+		t, ok := w.ownedTenant(rw, r, user)
+		if !ok {
+			return
+		}
+		name := r.PathValue("plugin")
+		changed := on != slices.Contains(t.Spec.Plugins, name)
+		msg := w.togglePlugin(r.Context(), t, name, on)
+		if wantsJSON(r) { // ctrlplane plugin on / off
+			reply(rw, msg, map[string]any{"name": name, "on": on, "changed": changed})
+			return
+		}
+		toast(rw, msg, map[bool]string{true: "Turned on ", false: "Turned off "}[on]+name)
+		d := w.tenantData(r.Context(), t, msg)
+		d.Starting = msg == ""
+		w.loadPluginKinds(r.Context(), t, user, d)
+		w.render(rw, "plugins", d)
+	}
+}
+
+func (w *web) togglePlugin(ctx context.Context, t *platformv1alpha1.Tenant, name string, on bool) string {
+	if _, err := loadPlugin(w.pluginsDir, name); err != nil {
+		return err.Error()
+	}
+	if on == slices.Contains(t.Spec.Plugins, name) {
+		return ""
+	}
+	cfg, err := tenantAdmin(ctx, w.Client, w.platformNS, t.GetName())
+	if err != nil {
+		return err.Error()
+	}
+	crds, err := pluginCRDs(w.pluginsDir, name)
+	if err != nil {
+		return err.Error()
+	}
+	if on {
+		groups := map[string]bool{}
+		for _, c := range crds {
+			groups[c.Group] = true
+		}
+		dc, err := dynamic.NewForConfig(cfg)
+		if err != nil {
+			return err.Error()
+		}
+		own, err := dc.Resource(crdGVR).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return err.Error()
+		}
+		for _, crd := range own.Items {
+			if group, _, _ := unstructured.NestedString(crd.Object, "spec", "group"); groups[group] && crd.GetLabels()[labelPlugin] == "" {
+				return fmt.Sprintf("your CRD %s is in a group %s brings (%s): delete it first", crd.GetName(), name, group)
+			}
+		}
+		t.Spec.Plugins = append(t.Spec.Plugins, name)
+	} else {
+		used, err := pluginCRDsInUse(ctx, cfg, crds)
+		if err != nil {
+			return err.Error()
+		}
+		if len(used) > 0 {
+			return "delete its resources first: " + strings.Join(used, ", ")
+		}
+		t.Spec.Plugins = slices.DeleteFunc(t.Spec.Plugins, func(o string) bool { return o == name })
+	}
+	return w.update(ctx, t)
+}
+
 // restartDeployment rolls a deployment's pods as `kubectl rollout restart` does. A merge patch
 // under its own field manager, so the reconciler's server-side apply leaves the annotation be.
 func restartDeployment(ctx context.Context, c client.Client, ns, name string) error {
@@ -1182,6 +1362,14 @@ func (w *web) tenantData(ctx context.Context, t *platformv1alpha1.Tenant, msg st
 	spec := t.Spec
 	lim, _ := w.acct.limitsFor(ctx, spec.Owners)
 	d.TunnelAllowed = lim.Tunnel
+	if all, _ := listPlugins(w.pluginsDir); len(all) > 0 {
+		for _, p := range all {
+			d.Plugins = append(d.Plugins, pluginView{Name: p.Name(), Description: p.Spec.Description, Docs: p.Spec.Docs, Guide: p.Spec.Guide, On: slices.Contains(spec.Plugins, p.Name())})
+			if d.Plugins[len(d.Plugins)-1].On {
+				d.PluginsOn++
+			}
+		}
+	}
 	run, _, _ := allocate(spec.Controllers, lim)
 	for _, c := range spec.Controllers {
 		v := controllerView{Name: c.Name, Image: c.Image, Args: strings.Join(c.Args, "\n"), State: "starting", Private: len(c.ImagePullSecrets) > 0, Stopped: c.Stopped}
@@ -1551,6 +1739,9 @@ func (w *web) loadCRDs(ctx context.Context, t *platformv1alpha1.Tenant, user str
 		return
 	}
 	for _, c := range list.Items {
+		if c.GetLabels()[labelPlugin] != "" { // a plugin's: under Plugins (loadPluginKinds)
+			continue
+		}
 		v := crdView{Name: c.GetName()}
 		v.Kind, _, _ = unstructured.NestedString(c.Object, "spec", "names", "kind")
 		versions, _, _ := unstructured.NestedSlice(c.Object, "spec", "versions")
@@ -1602,7 +1793,7 @@ func (w *web) resources(rw http.ResponseWriter, r *http.Request, user string) {
 			return
 		}
 		d := &tenantData{Name: t.GetName()}
-		w.loadResources(r.Context(), t, user, d)
+		w.loadResources(r.Context(), t, user, d, false)
 		w.render(rw, "resources", d)
 	}
 }
@@ -1657,8 +1848,8 @@ func (w *web) applyResources(rw http.ResponseWriter, r *http.Request, user strin
 		}
 		return ""
 	}()
-	toast(rw, d.Error, "Applied "+plural(applied, "object"))
-	w.loadResources(r.Context(), t, user, d)
+	toast(rw, d.Error, "Applied "+plural(applied, "object"), "objects-changed")
+	w.loadResources(r.Context(), t, user, d, false)
 	w.render(rw, "resources", d)
 }
 
@@ -1675,14 +1866,15 @@ func (w *web) deleteResource(rw http.ResponseWriter, r *http.Request, user strin
 	} else if err := dc.Resource(gvr).Namespace(q.Get("namespace")).Delete(r.Context(), q.Get("name"), metav1.DeleteOptions{}); client.IgnoreNotFound(err) != nil {
 		d.Error = err.Error()
 	}
-	toast(rw, d.Error, "Deleted "+q.Get("name"))
-	w.loadResources(r.Context(), t, user, d)
+	toast(rw, d.Error, "Deleted "+q.Get("name"), "objects-changed")
+	w.loadResources(r.Context(), t, user, d, false)
 	w.render(rw, "resources", d)
 }
 
-// loadResources lists the objects of every established CRD (its storage version).
+// loadResources lists the objects of every established CRD (its storage version): the tenant's
+// own, or with plugins the plugins' (loadPluginKinds).
 // ponytail: one List per CRD per render; fine for a handful of operators.
-func (w *web) loadResources(ctx context.Context, t *platformv1alpha1.Tenant, user string, d *tenantData) {
+func (w *web) loadResources(ctx context.Context, t *platformv1alpha1.Tenant, user string, d *tenantData, plugins bool) {
 	cfg, err := w.tenantConfig(ctx, t, user)
 	if err != nil {
 		d.Error = cmp.Or(d.Error, err.Error())
@@ -1704,7 +1896,10 @@ func (w *web) loadResources(ctx context.Context, t *platformv1alpha1.Tenant, use
 		return
 	}
 	for _, c := range crds.Items {
-		k := kindTable{}
+		k := kindTable{Tenant: t.GetName(), Plugin: c.GetLabels()[labelPlugin]}
+		if (k.Plugin != "") != plugins {
+			continue
+		}
 		k.Kind, _, _ = unstructured.NestedString(c.Object, "spec", "names", "kind")
 		k.Group, _, _ = unstructured.NestedString(c.Object, "spec", "group")
 		k.Resource, _, _ = unstructured.NestedString(c.Object, "spec", "names", "plural")

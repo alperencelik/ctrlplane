@@ -16,6 +16,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -100,6 +101,8 @@ func runSuite(m *testing.M) int {
 		acct:           &accounts{Client: mgr.GetClient(), ns: "platform-system", defaultSignup: "open"},
 		platformNS:     "platform-system",
 		apiserverImage: "tenant-apiserver:test",
+		pluginsDir:     "testdata/plugins",
+		pluginsImage:   "plugins:test",
 		pullSecrets:    []string{"regcred"},
 		apiserverResources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
 			Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")}},
@@ -235,6 +238,77 @@ func TestTenantLifecycle(t *testing.T) {
 			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(o), o); !apierrors.IsNotFound(err) {
 				return fmt.Errorf("%s still there (%v)", o.GetName(), err)
 			}
+		}
+		return nil
+	})
+}
+
+// A plugin's resources live in the host namespace plugins-<tenant>: the tenant API server's
+// ServiceAccount may use them there (and only them), within a quota. The API server gets the
+// CRDs through an init container and is told that namespace. Turning it off removes both.
+func TestTenantPlugins(t *testing.T) {
+	ctx := context.Background()
+	tenant := &platformv1alpha1.Tenant{ObjectMeta: metav1.ObjectMeta{Name: "plugged"}, Spec: platformv1alpha1.TenantSpec{
+		Owners: []string{"github:alice"}, Plugins: []string{"e2e-gadgets", "gone"}}} // gone: not in the catalog, skipped
+	if err := k8sClient.Create(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	ns, pns := "tenant-plugged", "plugins-plugged"
+	sts := &appsv1.StatefulSet{}
+	eventually(t, func() error {
+		n := &corev1.Namespace{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Name: pns}, n); err != nil {
+			return err
+		}
+		if n.Labels["platform.ctrlplane.run/plugins-of"] != "plugged" || len(n.OwnerReferences) != 1 || n.OwnerReferences[0].Name != "plugged" {
+			return fmt.Errorf("plugins namespace %+v", n.ObjectMeta)
+		}
+		role := &rbacv1.Role{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: pns, Name: "plugin-resources"}, role); err != nil {
+			return err
+		}
+		if len(role.Rules) != 2 || !slices.Equal(role.Rules[0].Resources, []string{"gadgets"}) || slices.Contains(role.Rules[0].Verbs, "*") ||
+			!slices.Equal(role.Rules[1].Resources, []string{"gadgets/status"}) || !slices.Equal(role.Rules[1].Verbs, []string{"get"}) {
+			return fmt.Errorf("role %+v", role.Rules)
+		}
+		rb := &rbacv1.RoleBinding{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: pns, Name: "plugin-resources"}, rb); err != nil {
+			return err
+		}
+		if len(rb.Subjects) != 1 || rb.Subjects[0].Kind != "ServiceAccount" || rb.Subjects[0].Name != "apiserver" || rb.Subjects[0].Namespace != ns {
+			return fmt.Errorf("role binding %+v", rb.Subjects)
+		}
+		q := &corev1.ResourceQuota{}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: pns, Name: "plugin-resources"}, q); err != nil {
+			return err
+		}
+		if n := q.Spec.Hard["count/gadgets.plugin.example.com"]; n.Value() != pluginObjects {
+			return fmt.Errorf("quota %+v", q.Spec.Hard)
+		}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: "apiserver"}, sts); err != nil {
+			return err
+		}
+		pod := sts.Spec.Template.Spec
+		if len(pod.InitContainers) != 1 || pod.InitContainers[0].Image != "plugins:test" || !strings.Contains(pod.InitContainers[0].Command[2], "cp /plugins/e2e-gadgets/crds.yaml") || strings.Contains(pod.InitContainers[0].Command[2], "gone") ||
+			!slices.Contains(pod.Containers[0].Args, "--plugin-crds-dir=/plugin-crds") || !slices.Contains(pod.Containers[0].Args, "--plugins-namespace="+pns) {
+			return fmt.Errorf("API server pod without the plugin: %+v", pod)
+		}
+		return nil
+	})
+	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(tenant), tenant); err != nil {
+		t.Fatal(err)
+	}
+	tenant.Spec.Plugins = nil
+	if err := k8sClient.Update(ctx, tenant); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() error {
+		// envtest has no namespace controller: deleted means terminating
+		if n := (&corev1.Namespace{}); k8sClient.Get(ctx, client.ObjectKey{Name: pns}, n) == nil && n.DeletionTimestamp == nil {
+			return fmt.Errorf("plugins namespace still there")
+		}
+		if err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns, Name: "apiserver"}, sts); err != nil || len(sts.Spec.Template.Spec.InitContainers) != 0 {
+			return fmt.Errorf("init container still there (%v)", err)
 		}
 		return nil
 	})

@@ -1,0 +1,5 @@
+apiVersion: plugins.ctrlplane.run/v1alpha1
+kind: Plugin
+metadata: {name: e2e-gadgets}
+spec:
+  description: Test plugin; a Gadget CRD, reconciled on the host

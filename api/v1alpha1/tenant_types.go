@@ -43,6 +43,14 @@ type TenantSpec struct {
 	// +listMapKey=name
 	Controllers []ControllerSpec `json:"controllers,omitempty"`
 
+	// Plugins turned on: operators the hosting runs on the host. Their CRDs are served read-only
+	// by the API server, their resources kept in host namespace plugins-<name> (see cmd/platform/plugins.go)
+	// +optional
+	// +listType=set
+	// +kubebuilder:validation:MaxItems=20
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$`
+	Plugins []string `json:"plugins,omitempty"`
+
 	// Network path from the controllers into the tenant's network (SOCKS5 via HTTPS_PROXY)
 	// +optional
 	Tunnel *TunnelSpec `json:"tunnel,omitempty"`
