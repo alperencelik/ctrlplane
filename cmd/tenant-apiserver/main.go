@@ -82,7 +82,9 @@ func main() {
 				return fmt.Errorf("pki: %w", err)
 			}
 
-			etcd, err := endpoint.Listen(ctx, endpoint.Config{
+			// Not ctx: kine must outlive SIGTERM, or the API server drains against no storage and
+			// hangs every request until the kubelet kills it (it dies with the process anyway).
+			etcd, err := endpoint.Listen(context.WithoutCancel(ctx), endpoint.Config{
 				Listener:            "unix://kine.sock",
 				Endpoint:            datastore,
 				NotifyInterval:      5 * time.Second,
@@ -92,6 +94,7 @@ func main() {
 				CompactMinRetain:    1000,
 				CompactBatchSize:    1000,
 				PollBatchSize:       500,
+				PollInterval:        time.Second, // kine 0.17.3+ refuses zero (its CLI default)
 			})
 			if err != nil {
 				return fmt.Errorf("kine: %w", err)
